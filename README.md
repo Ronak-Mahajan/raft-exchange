@@ -1,0 +1,170 @@
+# raft-exchange
+
+A distributed exchange built the hard way: a Raft consensus core written from
+the paper, verified by deterministic simulation and mutation testing before
+any networking exists, with a matching engine as the replicated state
+machine.
+
+The premise: an exchange is the worst-case consensus workload. Orders are not
+idempotent, ordering is the product, and a split-brain that double-fills one
+order is not a bug you apologize for. So the consensus layer gets built and
+attacked first, alone, until it survives everything a seeded adversary can
+generate. Only then does it earn a matching engine on top.
+
+## What exists today (Phase A)
+
+- **`src/raft.hpp`** — the Raft core (Ongaro & Ousterhout 2014) as a pure
+  state machine: no threads, no sockets, no clocks. It consumes virtual time
+  and messages, and emits messages. Every rule cites the figure-2 clause it
+  implements, and the classic subtle bugs are guarded where they live:
+  - commit-index advancement restricted to current-term entries (the
+    section 5.4.2 rule; skipping it is the figure-8 bug, where a "committed"
+    entry from an older term gets erased by a later leader)
+  - vote reset exactly on term bump (forgetting it allows double voting)
+  - truncate-on-first-conflict only (blind truncation at `prevLogIndex` lets
+    a stale retransmission erase newer valid entries)
+  - the section 5.4.1 up-to-date check before granting votes
+  - persistence boundary matching figure 2 exactly: `currentTerm`,
+    `votedFor`, `log[]` survive a crash, nothing else does
+- **`src/sim.hpp`** — a deterministic network simulator in the FoundationDB
+  style. Every delay, drop, duplicate, partition, and crash is a function of
+  one seed; a failure at seed 8571 is a permanent reproduction, not a flake.
+- **`tests/test_raft.cpp`** — three layers: scripted adversaries forcing the
+  interleavings random search misses, seeded scenario sweeps at three
+  cluster sizes, and measured liveness bounds.
+
+```
+scripted       figure8, stale-AE, apply+replay, votes x3, quorums x3,
+               timers x2, clamp: pass
+basic          n=3/5/7 x 150 seeds, all invariants held
+partition      n=3/5/7 x 150 seeds, all invariants held
+crash_restart  n=3/5/7 x 150 seeds, all invariants held
+lossy          n=3/5/7 x 150 seeds, all invariants held
+reorder_dup    n=3/5/7 x 150 seeds, all invariants held
+oneway         n=3/5/7 x 150 seeds, all invariants held
+slow_wire      n=3/5/7 x 150 seeds, all invariants held
+even_split     n=4 x 150 seeds, all invariants held
+timing_stress  250 seeds, all invariants held (safety only)
+liveness       250 seeds, virtual ms: cold-start max 465 <= 900, failover
+               max 570 <= 900, commit-on-all max 90 <= 300,
+               heal-reconverge max 40 <= 900
+
+OK: 4550 seeded universes + scripted adversaries, invariants checked after
+every event
+```
+
+## The oracles were earned, not assumed
+
+The first version of this suite ran 4 scenarios across 1,000 seeded
+universes and passed. Then it was mutation-tested: re-introduce a known bug,
+and a suite worth trusting must fail. Two of the five mutants **survived
+8,000 universes**:
+
+- **Deleting the figure-8 guard** (commit older-term entries by count — THE
+  canonical Raft safety bug) changed nothing. Two blind spots compounded:
+  random crash churn never produces the figure-8 interleaving, and the
+  oracle compared *current* logs pairwise, so once the rival leader
+  overwrote the "committed" entry on every node, the states re-converged
+  and looked consistent. The violation had no witness.
+- **Blind log truncation** also survived, for a structural reason: the
+  simulated network's max delay (15 ms) was shorter than the heartbeat
+  interval (25 ms), so consecutive AppendEntries could never cross in
+  flight, and the wire never duplicated. The stale-retransmission
+  interleaving that truncation protects against was unrepresentable.
+
+A second round hunted NOVEL mutants after the first fixes landed, and found
+three more survivors — the sharpest being an Election Safety hole the
+network model structurally could not reach: dropping the term guard on vote
+counting (a candidate tallying granted replies from its *previous*
+election) changed nothing across 3,950 universes, because every simulated
+round trip was shorter than the minimum election timeout, so a stale reply
+never existed. The fix is a wire whose delays exceed the election timeout
+(`slow_wire`), plus a scripted test that delivers yesterday's votes to
+today's candidate. The same round caught that every seeded cluster size was
+odd — where `>` and `>=` majorities coincide — hiding an election-quorum
+off-by-one; `even_split` (a 4-node cluster split 2-2, where neither side
+may elect or commit) closes that. All twelve mutants across both rounds are
+now killed by the suite.
+
+Every oracle in the current suite exists because a mutant demanded it:
+
+1. **The committed-entry ledger** — the moment *any* node commits index i,
+   the entry at i is frozen forever, and every node's state is held against
+   it after every event. Memory is what catches figure 8: re-convergence on
+   overwritten history no longer hides the crime.
+2. **The applied-sequence canon** — every node's state machine drains
+   through the simulator, which enforces that all nodes apply the identical
+   commands in the identical order, exactly once per epoch, and that a
+   restarted node's replay reproduces the canon. This is the property the
+   matching engine will actually stand on (State Machine Safety), checked
+   continuously in all 3,950 universes.
+3. **A wire that fights back** — configurable duplication and delays longer
+   than the heartbeat interval, so stale AppendEntries genuinely arrive
+   after newer ones and first-conflict truncation is load-bearing.
+4. **Scripted adversaries** — the figure-8 interleaving and the stale
+   retransmission, driven message by message, because some interleavings
+   deserve a guaranteed appearance rather than a probabilistic one.
+
+The same review fixed three real (non-mutant) findings: an isolated node
+re-elected forever with a frozen timeout because the simulator only redrew
+randomized timeouts on message receipt — exactly when elections happen,
+messages have stopped (now redrawn before every tick); a deposed leader kept
+its long-expired election deadline and immediately fired a disruptive
+election (now waits a full randomized timeout); and single-node clusters
+could never commit because commit advancement only ran in the reply handler
+(now also runs at propose time).
+
+## Why simulation instead of unit tests
+
+Consensus bugs live in interleavings, not in functions. A unit test checks
+the path you thought of; a seeded simulator generates the paths you did not,
+and makes each one replayable. The two design rules that make this work:
+
+1. The core is pure logic. Time is an argument, the network is a message
+   list, randomness lives in the simulator. The same logic that runs under
+   simulation will run under a real transport later, untouched.
+2. Invariants are checked at every event boundary, so a violation is caught
+   in the state that produced it, not three seconds later.
+
+Known limitation, on purpose: under a one-way link failure (leader can
+send, cannot hear), basic Raft livelocks — the deaf leader's heartbeats
+keep followers loyal while nothing can commit. The `oneway` scenario pins
+the safe behavior (no commit without acks, no spurious depositions,
+recovery on heal); the fix is the check-quorum extension, which belongs to
+Phase C.
+
+## Build and run
+
+Windows (any g++ with C++20; MSYS2/WinLibs works):
+
+```
+./build.ps1
+```
+
+or directly:
+
+```
+g++ -std=c++20 -O2 -Wall -Wextra -static tests/test_raft.cpp -o test_raft
+./test_raft
+```
+
+No dependencies. One translation unit. The full suite runs in about four
+seconds.
+
+## Roadmap
+
+- **Phase B — the state machine is an exchange.** Wire a price-time-priority
+  matching engine (adapted from [hft-lob](https://github.com/Ronak-Mahajan/hft-lob))
+  as the replicated state machine: committed log entries are orders, applying
+  an entry is matching it, and the applied-sequence canon becomes "every
+  replica's book is byte-identical at every commit point." Determinism of
+  the engine stops being a performance trick and becomes the correctness
+  foundation.
+- **Phase C — chaos with numbers.** Client-visible latency percentiles
+  (p50/p99 order-to-ack under leader failover), check-quorum for the
+  one-way-partition livelock, snapshotting/log compaction, and a real TCP
+  transport behind the same message interface the simulator drives.
+
+## License
+
+MIT
