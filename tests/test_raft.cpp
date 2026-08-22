@@ -516,8 +516,8 @@ static void scenario_partition(std::uint64_t seed, int n) {
 }
 
 // Crash-and-restart churn: persistent state survives, volatile state is
-// rebuilt, and the churned cluster must still be LIVE, not just consistent
-// (a cluster that commits nothing never diverges).
+// rebuilt, and consistency alone proves little (a cluster that commits
+// nothing never diverges), so the churned cluster must also still commit.
 static void scenario_crash_restart(std::uint64_t seed, int n) {
     sim::Cluster c(seed, with_n(n));
     std::mt19937_64 rng(seed ^ 0x9e3779b97f4a7c15ULL);

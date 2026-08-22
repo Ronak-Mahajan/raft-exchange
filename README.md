@@ -15,7 +15,7 @@ generate. Only then does it earn a matching engine on top.
 
 ## What exists today (Phases A and B)
 
-- **`src/raft.hpp`** — the Raft core (Ongaro & Ousterhout 2014) as a pure
+- **`src/raft.hpp`** is the Raft core (Ongaro & Ousterhout 2014) as a pure
   state machine: no threads, no sockets, no clocks. It consumes virtual time
   and messages, and emits messages. Every rule cites the figure-2 clause it
   implements, and the classic subtle bugs are guarded where they live:
@@ -28,23 +28,24 @@ generate. Only then does it earn a matching engine on top.
   - the section 5.4.1 up-to-date check before granting votes
   - persistence boundary matching figure 2 exactly: `currentTerm`,
     `votedFor`, `log[]` survive a crash, nothing else does
-- **`src/sim.hpp`** — a deterministic network simulator in the FoundationDB
+- **`src/sim.hpp`** is a deterministic network simulator in the FoundationDB
   style. Every delay, drop, duplicate, partition, and crash is a function of
   one seed; a failure at seed 8571 is a permanent reproduction, not a flake.
-- **`src/exchange.hpp`** — the replicated state machine: a deterministic
+- **`src/exchange.hpp`** is the replicated state machine: a deterministic
   price-time-priority matching engine. Integer ticks only, ordered
   containers only, no clocks, no randomness; every input, malformed ones
-  included, has exactly one defined outcome. The entire observable state --
-  resting book with FIFO queue order, every fill ever produced, every
-  rejection -- folds into one FNV-1a hash, so two replicas agree if and
+  included, has exactly one defined outcome. The entire observable state
+  (resting book with FIFO queue order, every fill ever produced, every
+  rejection) folds into one FNV-1a hash, so two replicas agree if and
   only if one number agrees.
-- **`tests/test_raft.cpp`** — three layers: scripted adversaries forcing the
-  interleavings random search misses, seeded scenario sweeps at three
+- **`tests/test_raft.cpp`** runs three layers: scripted adversaries forcing
+  the interleavings random search misses, seeded scenario sweeps at three
   cluster sizes, and measured liveness bounds.
-- **`tests/test_exchange.cpp`** — matching-semantics units plus the
-  replicated exchange under chaos: random order flow proposed through Raft
-  while nodes crash, restart, and partition, with the book hash checked at
-  **every applied position on every replica**, restart replays included.
+- **`tests/test_exchange.cpp`** covers matching semantics at the unit level,
+  then the replicated exchange under chaos: random order flow proposed
+  through Raft while nodes crash, restart, and partition, with the book
+  hash checked at **every applied position on every replica**, restart
+  replays included.
 
 ```
 scripted       figure8, stale-AE, apply+replay, votes x3, quorums x3,
@@ -81,7 +82,7 @@ universes and passed. Then it was mutation-tested: re-introduce a known bug,
 and a suite worth trusting must fail. Two of the five mutants **survived
 8,000 universes**:
 
-- **Deleting the figure-8 guard** (commit older-term entries by count — THE
+- **Deleting the figure-8 guard** (commit older-term entries by count, the
   canonical Raft safety bug) changed nothing. Two blind spots compounded:
   random crash churn never produces the figure-8 interleaving, and the
   oracle compared *current* logs pairwise, so once the rival leader
@@ -94,42 +95,43 @@ and a suite worth trusting must fail. Two of the five mutants **survived
   interleaving that truncation protects against was unrepresentable.
 
 A second round hunted NOVEL mutants after the first fixes landed, and found
-three more survivors — the sharpest being an Election Safety hole the
-network model structurally could not reach: dropping the term guard on vote
+three more survivors. The sharpest was an Election Safety hole the network
+model structurally could not reach: dropping the term guard on vote
 counting (a candidate tallying granted replies from its *previous*
 election) changed nothing across 3,950 universes, because every simulated
 round trip was shorter than the minimum election timeout, so a stale reply
 never existed. The fix is a wire whose delays exceed the election timeout
 (`slow_wire`), plus a scripted test that delivers yesterday's votes to
 today's candidate. The same round caught that every seeded cluster size was
-odd — where `>` and `>=` majorities coincide — hiding an election-quorum
+odd, where `>` and `>=` majorities coincide, which hid an election-quorum
 off-by-one; `even_split` (a 4-node cluster split 2-2, where neither side
 may elect or commit) closes that. All twelve mutants across both rounds are
 now killed by the suite.
 
 Every oracle in the current suite exists because a mutant demanded it:
 
-1. **The committed-entry ledger** — the moment *any* node commits index i,
+1. **The committed-entry ledger.** The moment *any* node commits index i,
    the entry at i is frozen forever, and every node's state is held against
    it after every event. Memory is what catches figure 8: re-convergence on
    overwritten history no longer hides the crime.
-2. **The applied-sequence canon** — every node's state machine drains
+2. **The applied-sequence canon.** Every node's state machine drains
    through the simulator, which enforces that all nodes apply the identical
    commands in the identical order, exactly once per epoch, and that a
    restarted node's replay reproduces the canon. This is the property the
    matching engine will actually stand on (State Machine Safety), checked
    continuously in all 3,950 universes.
-3. **A wire that fights back** — configurable duplication and delays longer
+3. **A wire that fights back.** Configurable duplication and delays longer
    than the heartbeat interval, so stale AppendEntries genuinely arrive
    after newer ones and first-conflict truncation is load-bearing.
-4. **Scripted adversaries** — the figure-8 interleaving and the stale
+4. **Scripted adversaries.** The figure-8 interleaving and the stale
    retransmission, driven message by message, because some interleavings
    deserve a guaranteed appearance rather than a probabilistic one.
 
 The same review fixed three real (non-mutant) findings: an isolated node
-re-elected forever with a frozen timeout because the simulator only redrew
-randomized timeouts on message receipt — exactly when elections happen,
-messages have stopped (now redrawn before every tick); a deposed leader kept
+re-elected forever with a frozen timeout, because the simulator only redrew
+randomized timeouts on message receipt and the moment elections matter is
+precisely when messages have stopped (now redrawn before every tick); a
+deposed leader kept
 its long-expired election deadline and immediately fired a disruptive
 election (now waits a full randomized timeout); and single-node clusters
 could never commit because commit advancement only ran in the reply handler
@@ -148,7 +150,7 @@ and makes each one replayable. The two design rules that make this work:
    in the state that produced it, not three seconds later.
 
 Known limitation, on purpose: under a one-way link failure (leader can
-send, cannot hear), basic Raft livelocks — the deaf leader's heartbeats
+send, cannot hear), basic Raft livelocks: the deaf leader's heartbeats
 keep followers loyal while nothing can commit. The `oneway` scenario pins
 the safe behavior (no commit without acks, no spurious depositions,
 recovery on heal); the fix is the check-quorum extension, which belongs to
@@ -179,9 +181,9 @@ engine is a from-scratch deterministic counterpart to the performance-first
 book in [hft-lob](https://github.com/Ronak-Mahajan/hft-lob): here
 determinism stops being a performance trick and becomes the correctness
 foundation. The simulator drives it through per-node apply/restart hooks,
-so the state-machine-safety oracle gets teeth: not "the logs agree" but
-"the books agree, at every applied position, on every replica, through
-crashes, replays, partitions, and reordered wires." Client-session
+so the state-machine-safety oracle gets teeth: the books must agree at
+every applied position, on every replica, through crashes, replays,
+partitions, and reordered wires. Client-session
 deduplication (exactly-once submission across leader failover) is
 deliberately not here yet; today a resubmitted order id is rejected
 deterministically, and sessions belong to Phase C.
@@ -189,15 +191,15 @@ deterministically, and sessions belong to Phase C.
 The engine went through the same adversarial treatment as the consensus
 core, and the first version failed it in instructive ways. A review found
 the state hash was forgeable (level sentinels could be impersonated by
-client-chosen order ids -- two observably different books, one hash; fixed
-with count-prefix framing), that `operator>>` parsing consults the process
+client-chosen order ids, giving two observably different books one hash;
+fixed with count-prefix framing), that `operator>>` parsing consults the process
 global locale (two identical binaries can diverge on the same bytes; fixed
 with a hand-rolled digits-only parser and a canonical grammar), and that
 unbounded quantities made volume arithmetic undefined behavior (fixed with
 admission bounds). Mutation testing then showed the chaos layer has zero
-matching-semantics killing power on its own -- every replica runs the same
+matching-semantics killing power on its own (every replica runs the same
 mutated binary and diverges identically, so all semantic coverage lives in
-the unit layer -- and that the unit layer had six blind spots, the
+the unit layer) and that the unit layer had six blind spots, the
 sharpest being the one-character sell-side mirror of a fully-pinned
 buy-side rule. All twelve engine mutants now die, an uncrossed-book
 invariant runs in every chaos universe, hostile commands flow through the
@@ -206,7 +208,7 @@ turns any cross-build drift into a local unit failure.
 
 ## Roadmap
 
-- **Phase C — chaos with numbers.** Client-visible latency percentiles
+- **Phase C: chaos with numbers.** Client-visible latency percentiles
   (p50/p99 order-to-ack under leader failover), check-quorum for the
   one-way-partition livelock, client sessions with exactly-once submission,
   snapshotting/log compaction, and a real TCP transport behind the same

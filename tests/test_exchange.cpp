@@ -117,7 +117,7 @@ static void unit_accounting() {
           "book empty again after the full cross");
 }
 
-// The hash must cover the fill STREAM, not just the resting book: two
+// The hash must cover the fill STREAM as well as the resting book: two
 // replicas with identical (empty) books, identical counts, and identical
 // volume but fills at different prices must disagree.
 static void unit_hash_covers_fills() {
