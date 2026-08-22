@@ -17,6 +17,7 @@
 #pragma once
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <queue>
@@ -68,6 +69,7 @@ public:
         }
         up_.insert(id);
         applied_len_[static_cast<size_t>(id)] = 0;   // state machine replays
+        if (restart_hook_) restart_hook_(id);
         nodes_[id].restart(stable_[id], now_, rand_timeout());
     }
     void set_drop(double p) { cfg_.drop_prob = p; }
@@ -134,6 +136,18 @@ public:
         return true;
     }
     std::string violation;
+
+    // ---- state-machine hooks --------------------------------------------
+    // apply hook: called for every entry a node applies, with the node id
+    // and the 0-based position in that node's applied stream (restarts
+    // replay from 0). Return false to flag a state-machine-level
+    // divergence: the run stops with a violation at that exact event.
+    // restart hook: called when a node restarts, before its replay begins.
+    using ApplyHook =
+        std::function<bool(int, const raft::Entry&, std::size_t)>;
+    using RestartHook = std::function<void(int)>;
+    void set_apply_hook(ApplyHook h) { apply_hook_ = std::move(h); }
+    void set_restart_hook(RestartHook h) { restart_hook_ = std::move(h); }
 
 private:
     std::uint64_t rand_timeout() {
@@ -226,6 +240,12 @@ private:
                                         std::to_string(k + 1);
                             return false;
                         }
+                if (apply_hook_ && !apply_hook_(id, e, k)) {
+                    violation = "state machine diverged applying position " +
+                                std::to_string(k + 1) + " on node " +
+                                std::to_string(id);
+                    return false;
+                }
             }
         }
         return true;
@@ -297,6 +317,8 @@ private:
     std::vector<size_t> applied_len_;
     std::map<raft::Index,
              std::vector<std::pair<raft::Term, std::string>>> pending_;
+    ApplyHook apply_hook_;
+    RestartHook restart_hook_;
     std::uint64_t now_ = 0, seq_ = 0;
     using Item = std::tuple<std::uint64_t, std::uint64_t, raft::Message>;
     struct Later {

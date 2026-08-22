@@ -1,4 +1,4 @@
-# Build and run the seeded-universe test suite.
+# Build and run both suites: the Raft core and the replicated exchange.
 # Requires any g++ with C++20 support on PATH (MSYS2 / WinLibs / MinGW-w64).
 $ErrorActionPreference = "Stop"
 
@@ -12,7 +12,11 @@ if (-not $gxx) {
 }
 
 & $gxx.Source -std=c++20 -O2 -Wall -Wextra -static tests/test_raft.cpp -o test_raft.exe
-if ($LASTEXITCODE -ne 0) { throw "compile failed" }
+if ($LASTEXITCODE -ne 0) { throw "compile failed: test_raft" }
+& $gxx.Source -std=c++20 -O2 -Wall -Wextra -static tests/test_exchange.cpp -o test_exchange.exe
+if ($LASTEXITCODE -ne 0) { throw "compile failed: test_exchange" }
 
 ./test_raft.exe
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+./test_exchange.exe
 exit $LASTEXITCODE

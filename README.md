@@ -11,7 +11,7 @@ order is not a bug you apologize for. So the consensus layer gets built and
 attacked first, alone, until it survives everything a seeded adversary can
 generate. Only then does it earn a matching engine on top.
 
-## What exists today (Phase A)
+## What exists today (Phases A and B)
 
 - **`src/raft.hpp`** — the Raft core (Ongaro & Ousterhout 2014) as a pure
   state machine: no threads, no sockets, no clocks. It consumes virtual time
@@ -29,9 +29,20 @@ generate. Only then does it earn a matching engine on top.
 - **`src/sim.hpp`** — a deterministic network simulator in the FoundationDB
   style. Every delay, drop, duplicate, partition, and crash is a function of
   one seed; a failure at seed 8571 is a permanent reproduction, not a flake.
+- **`src/exchange.hpp`** — the replicated state machine: a deterministic
+  price-time-priority matching engine. Integer ticks only, ordered
+  containers only, no clocks, no randomness; every input, malformed ones
+  included, has exactly one defined outcome. The entire observable state --
+  resting book with FIFO queue order, every fill ever produced, every
+  rejection -- folds into one FNV-1a hash, so two replicas agree if and
+  only if one number agrees.
 - **`tests/test_raft.cpp`** — three layers: scripted adversaries forcing the
   interleavings random search misses, seeded scenario sweeps at three
   cluster sizes, and measured liveness bounds.
+- **`tests/test_exchange.cpp`** — matching-semantics units plus the
+  replicated exchange under chaos: random order flow proposed through Raft
+  while nodes crash, restart, and partition, with the book hash checked at
+  **every applied position on every replica**, restart replays included.
 
 ```
 scripted       figure8, stale-AE, apply+replay, votes x3, quorums x3,
@@ -51,6 +62,14 @@ liveness       250 seeds, virtual ms: cold-start max 465 <= 900, failover
 
 OK: 4550 seeded universes + scripted adversaries, invariants checked after
 every event
+```
+
+```
+engine units    price-time, FIFO, cancel, rejection, replay: pass
+replicated_book n=3/5/7 x 150 seeds, book identical at every applied
+                position on every replica
+
+OK: 450 chaos universes, the replicated book never diverged
 ```
 
 ## The oracles were earned, not assumed
@@ -151,19 +170,45 @@ g++ -std=c++20 -O2 -Wall -Wextra -static tests/test_raft.cpp -o test_raft
 No dependencies. One translation unit. The full suite runs in about four
 seconds.
 
+## The state machine is an exchange (Phase B)
+
+Committed log entries are orders; applying an entry is matching it. The
+engine is a from-scratch deterministic counterpart to the performance-first
+book in [hft-lob](https://github.com/Ronak-Mahajan/hft-lob): here
+determinism stops being a performance trick and becomes the correctness
+foundation. The simulator drives it through per-node apply/restart hooks,
+so the state-machine-safety oracle gets teeth: not "the logs agree" but
+"the books agree, at every applied position, on every replica, through
+crashes, replays, partitions, and reordered wires." Client-session
+deduplication (exactly-once submission across leader failover) is
+deliberately not here yet; today a resubmitted order id is rejected
+deterministically, and sessions belong to Phase C.
+
+The engine went through the same adversarial treatment as the consensus
+core, and the first version failed it in instructive ways. A review found
+the state hash was forgeable (level sentinels could be impersonated by
+client-chosen order ids -- two observably different books, one hash; fixed
+with count-prefix framing), that `operator>>` parsing consults the process
+global locale (two identical binaries can diverge on the same bytes; fixed
+with a hand-rolled digits-only parser and a canonical grammar), and that
+unbounded quantities made volume arithmetic undefined behavior (fixed with
+admission bounds). Mutation testing then showed the chaos layer has zero
+matching-semantics killing power on its own -- every replica runs the same
+mutated binary and diverges identically, so all semantic coverage lives in
+the unit layer -- and that the unit layer had six blind spots, the
+sharpest being the one-character sell-side mirror of a fully-pinned
+buy-side rule. All twelve engine mutants now die, an uncrossed-book
+invariant runs in every chaos universe, hostile commands flow through the
+replicated path, and a golden-vector test with a compiled-in expected hash
+turns any cross-build drift into a local unit failure.
+
 ## Roadmap
 
-- **Phase B — the state machine is an exchange.** Wire a price-time-priority
-  matching engine (adapted from [hft-lob](https://github.com/Ronak-Mahajan/hft-lob))
-  as the replicated state machine: committed log entries are orders, applying
-  an entry is matching it, and the applied-sequence canon becomes "every
-  replica's book is byte-identical at every commit point." Determinism of
-  the engine stops being a performance trick and becomes the correctness
-  foundation.
 - **Phase C — chaos with numbers.** Client-visible latency percentiles
   (p50/p99 order-to-ack under leader failover), check-quorum for the
-  one-way-partition livelock, snapshotting/log compaction, and a real TCP
-  transport behind the same message interface the simulator drives.
+  one-way-partition livelock, client sessions with exactly-once submission,
+  snapshotting/log compaction, and a real TCP transport behind the same
+  message interface the simulator drives.
 
 ## License
 
