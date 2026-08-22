@@ -1,0 +1,26 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    # Three toolchains on two platforms: the golden-vector test makes any
+    # cross-build divergence in observable engine state a hard failure.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cxx: g++
+          - os: ubuntu-latest
+            cxx: clang++
+          - os: windows-latest
+            cxx: g++
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build and run both suites
+        shell: bash
+        run: |
+          ${{ matrix.cxx }} -std=c++20 -O2 -Wall -Wextra tests/test_raft.cpp -o test_raft
+          ${{ matrix.cxx }} -std=c++20 -O2 -Wall -Wextra tests/test_exchange.cpp -o test_exchange
+          ./test_raft
+          ./test_exchange
