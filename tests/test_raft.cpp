@@ -7,8 +7,8 @@
 // 2. Seeded universes: every scenario across three cluster sizes and
 //    hundreds of seeds, with safety invariants (election safety, the
 //    committed-entry ledger, state-machine equivalence) checked after every
-//    event inside every run. A failure prints the seed and cluster size,
-//    which reproduce it exactly.
+//    simulation tick (5 virtual ms) inside every run. A failure prints the
+//    seed and cluster size, which reproduce it exactly.
 // 3. Liveness bounds: elections and commits must not merely happen, they
 //    must happen within a deadline, measured in virtual milliseconds.
 #include <cstdio>
@@ -885,7 +885,7 @@ int main() {
 
     if (failures == 0)
         std::printf("\nOK: %d seeded universes + scripted adversaries, "
-                    "invariants checked after every event\n", universes);
+                    "invariants checked after every tick\n", universes);
     else
         std::printf("\n%d FAILURES\n", failures);
     return failures ? 1 : 0;
