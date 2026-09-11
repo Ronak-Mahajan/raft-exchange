@@ -31,6 +31,7 @@
 #pragma once
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
