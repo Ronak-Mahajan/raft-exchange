@@ -58,7 +58,19 @@ public:
     // Block the from->to direction only: the classic one-way link failure.
     void block_oneway(int from, int to) { cut_.insert({from, to}); }
     void heal() { island_.clear(); cut_.clear(); }
-    void crash(int id) { up_.erase(id); stable_[id] = nodes_[id].stable(); }
+    // crash(leader()) with no leader in office passes -1 straight into
+    // nodes_[]: undefined behaviour that a mutant can trigger and that
+    // then masquerades as a mutant kill (see mutants/README.md, raft-09).
+    // Refuse loudly, the way restart() does.
+    void crash(int id) {
+        if (id < 0 || id >= cfg_.n_nodes) {
+            violation = "harness misuse: crash of out-of-range node " +
+                        std::to_string(id);
+            return;
+        }
+        up_.erase(id);
+        stable_[id] = nodes_[id].stable();
+    }
     void restart(int id) {
         // Restarting a node that never crashed would silently wipe its
         // durable state (a disk-loss model nobody asked for), letting it
