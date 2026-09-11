@@ -310,6 +310,11 @@ static void scenario_replicated_book(std::uint64_t seed, int n) {
 }
 
 int main() {
+    // Unbuffered: if a later stage aborts (a mutant can drive the harness
+    // into one), buffered stdout is discarded and the FAIL lines printed
+    // minutes earlier vanish, which made a real named kill look like an
+    // unexplained crash in the mutation table.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     int before = failures;
     unit_price_time_priority();
     unit_sell_at_bid();

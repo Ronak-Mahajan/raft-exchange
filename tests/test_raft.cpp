@@ -844,7 +844,12 @@ static void bounds_failover(std::uint64_t seed, Bound& b) {
     REQUIRE(t0.has_value(), seed, "no initial leader");
     REQUIRE(c.propose("x"), seed, "refused");
     REQUIRE(c.run_for(200), seed, c.violation.c_str());
-    c.crash(c.leader());
+    // Not c.crash(c.leader()): a mutant that inflates terms can depose
+    // the leader between the election above and this line, and -1 as a
+    // node id is undefined behaviour rather than a detection.
+    int ld0 = c.leader();
+    REQUIRE(ld0 >= 0, seed, "leader deposed before the failover crash");
+    c.crash(ld0);
     auto t = c.run_until(
         [](const sim::Cluster& cc) { return cc.leader() >= 0; }, 900);
     REQUIRE(t.has_value(), seed,
@@ -879,6 +884,7 @@ static void bounds_heal(std::uint64_t seed, Bound& b) {
         [](const sim::Cluster& cc) { return cc.leader() >= 0; }, 900);
     REQUIRE(t0.has_value(), seed, "no leader");
     int ld = c.leader();
+    REQUIRE(ld >= 0, seed, "leader deposed before the heal partition");
     REQUIRE(c.propose("pre"), seed, "refused");
     REQUIRE(c.run_for(200), seed, c.violation.c_str());
     c.partition({ld});
@@ -907,6 +913,11 @@ static void bounds_heal(std::uint64_t seed, Bound& b) {
 // ---------------------------------------------------------------------------
 
 int main() {
+    // Unbuffered: if a later stage aborts (a mutant can drive the harness
+    // into one), buffered stdout is discarded and the FAIL lines printed
+    // minutes earlier vanish, which made a real named kill look like an
+    // unexplained crash in the mutation table.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     int before = failures;
     unit_figure8();
     unit_stale_ae_retransmission();
