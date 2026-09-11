@@ -1,26 +1,117 @@
 name: ci
-on: [push, pull_request]
+on:
+  push:
+    branches: ['**']
+  pull_request:
+permissions:
+  contents: write
 jobs:
   test:
-    # Three toolchains on two platforms: the golden-vector test makes any
-    # cross-build divergence in observable engine state a hard failure.
+    # Five toolchain/stdlib legs on two platforms. The golden-vector test
+    # makes any cross-build divergence in observable engine state a hard
+    # failure, and the simulator's random draws are specified bit for bit
+    # (sim.hpp uniform_in/uniform_01), so a seed names the same universe on
+    # libstdc++, libc++ and MinGW. Ubuntu compilers are pinned to the
+    # versions the ubuntu-24.04 image ships; the Windows leg uses whatever
+    # MinGW g++ windows-latest preinstalls (its version is printed).
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - name: ubuntu-gcc
+            os: ubuntu-24.04
+            cxx: g++-13
+            flags: ""
+            apt: ""
+          - name: ubuntu-clang-libstdcxx
+            os: ubuntu-24.04
+            cxx: clang++-18
+            flags: ""
+            apt: ""
+          - name: ubuntu-clang-libcxx
+            os: ubuntu-24.04
+            cxx: clang++-18
+            flags: "-stdlib=libc++"
+            apt: "libc++-18-dev libc++abi-18-dev"
+          - name: ubuntu-gcc-asan-ubsan
+            os: ubuntu-24.04
+            cxx: g++-13
+            flags: "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g"
+            apt: ""
+          - name: windows-mingw-gcc
+            os: windows-latest
             cxx: g++
-          - os: ubuntu-latest
-            cxx: clang++
-          - os: windows-latest
-            cxx: g++
+            flags: ""
+            apt: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: install extra packages
+        if: matrix.apt != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
       - name: build and run both suites
         shell: bash
+        env:
+          CXX: ${{ matrix.cxx }}
+          EXTRA: ${{ matrix.flags }}
+          UBSAN_OPTIONS: print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1
         run: |
-          ${{ matrix.cxx }} -std=c++20 -O2 -Wall -Wextra tests/test_raft.cpp -o test_raft
-          ${{ matrix.cxx }} -std=c++20 -O2 -Wall -Wextra tests/test_exchange.cpp -o test_exchange
-          ./test_raft
-          ./test_exchange
+          {
+            "$CXX" --version
+            "$CXX" -std=c++20 -O2 -Wall -Wextra $EXTRA tests/test_raft.cpp -o test_raft
+            "$CXX" -std=c++20 -O2 -Wall -Wextra $EXTRA tests/test_exchange.cpp -o test_exchange
+            ./test_raft
+            ./test_exchange
+          } 2>&1 | tee -a ci.log; exit ${PIPESTATUS[0]}
+      - name: commit failure log
+        if: failure() && github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          mkdir -p .ci
+          out=".ci/last-failure-test-${{ matrix.name }}.log"
+          if [ -f ci.log ]; then tail -c 60000 ci.log > "$out"; else echo "no ci.log captured (failed before the build step)" > "$out"; fi
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git add .ci
+          git commit -m "ci: failure log [skip ci]" || exit 0
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then exit 0; fi
+            sleep $((i * 5))
+          done
+          exit 1
+
+  mutants:
+    # Mutation gate: every patch in mutants/ must apply, build, and be killed
+    # by at least one suite. A survivor, an unappliable patch, or a mutant
+    # that does not compile fails the build. See mutants/README.md.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: run the mutant table
+        shell: bash
+        env:
+          CXX: g++-13
+          MUTANT_TIMEOUT: "300"   # per suite per mutant; keeps the job well under 10 min
+        run: |
+          bash mutants/run.sh 2>&1 | tee -a ci.log; exit ${PIPESTATUS[0]}
+      - name: commit failure log
+        if: failure() && github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          mkdir -p .ci
+          out=".ci/last-failure-mutants.log"
+          if [ -f ci.log ]; then tail -c 60000 ci.log > "$out"; else echo "no ci.log captured (failed before the run step)" > "$out"; fi
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git add .ci
+          git commit -m "ci: failure log [skip ci]" || exit 0
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then exit 0; fi
+            sleep $((i * 5))
+          done
+          exit 1
