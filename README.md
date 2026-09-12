@@ -1,10 +1,6 @@
 # raft-exchange
 
-<!-- Owner note: the GitHub repository description (Settings > About) still
-     reads "Phase A of a replicated exchange". It lives outside this tree and
-     should be updated to cover Phase B, e.g. "Raft consensus core plus a
-     deterministic matching engine as the replicated state machine, verified
-     by seeded simulation and a CI-gated mutation suite". -->
+
 
 [![ci](https://github.com/Ronak-Mahajan/raft-exchange/actions/workflows/ci.yml/badge.svg)](https://github.com/Ronak-Mahajan/raft-exchange/actions/workflows/ci.yml)
 
