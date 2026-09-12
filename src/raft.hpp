@@ -8,6 +8,7 @@
 // advancement restricted to current-term entries, vote reset on term bump,
 // election timer reset conditions) are called out where they live.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>

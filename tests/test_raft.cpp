@@ -7,8 +7,8 @@
 // 2. Seeded universes: every scenario across three cluster sizes and
 //    hundreds of seeds, with safety invariants (election safety, the
 //    committed-entry ledger, state-machine equivalence) checked after every
-//    event inside every run. A failure prints the seed and cluster size,
-//    which reproduce it exactly.
+//    simulation tick (5 virtual ms) inside every run. A failure prints the
+//    seed and cluster size, which reproduce it exactly.
 // 3. Liveness bounds: elections and commits must not merely happen, they
 //    must happen within a deadline, measured in virtual milliseconds.
 #include <cstdio>
@@ -349,6 +349,107 @@ static void unit_stale_vote_count() {
           "leader elected in term 2 on term-1 votes (no term-2 majority)");
 }
 
+// The AppendEntries twin of the stale-vote hole above: a success reply
+// belongs to the term it answered. A leader that counts a reply from its
+// OWN EARLIER term takes a matchIndex the follower no longer honours (the
+// follower's log was truncated by an intervening leader in between) and
+// commits a current-term entry on a phantom replica. Random exploration
+// cannot reach this: it needs one reply delayed across two leader changes
+// plus a partial replication in between. (Found by the mutation gate in
+// mutants/: raft-12 survived every seeded universe until this test.)
+static void unit_stale_ae_reply() {
+    const int n = 5;                        // L=0, F=1, M=2, D=3, E=4
+    std::vector<raft::Node> ns;
+    for (int i = 0; i < n; ++i) ns.emplace_back(i, n);
+    std::uint64_t now = 0;
+    for (int i = 0; i < n; ++i)
+        ns[i].restart(raft::Persistent{}, now, i == 0 ? 10 : 1000000);
+
+    std::map<raft::Index, std::pair<raft::Term, std::string>> ledger;
+    auto ledger_check = [&](const char* where) {
+        for (auto& nd : ns) {
+            for (raft::Index i = 1; i <= nd.commit_index(); ++i) {
+                auto& e = nd.log()[static_cast<size_t>(i - 1)];
+                auto it = ledger.find(i);
+                if (it == ledger.end()) {
+                    ledger[i] = {e.term, e.cmd};
+                } else if (it->second !=
+                           std::make_pair(e.term, e.cmd)) {
+                    std::printf("FAIL: committed entry overwritten at idx "
+                                "%llu (%s)\n",
+                                (unsigned long long)i, where);
+                    ++failures;
+                    return;
+                }
+            }
+        }
+    };
+
+    MsgVec out, replies, stale;
+    // Term 1: L leads with everyone's vote, appends a,b,c and ships them
+    // to F only. F's success reply (match 3, term 1) is captured and HELD.
+    now = 10; ns[0].tick(now, out);
+    replies.clear(); deliver(ns, out, {1, 2, 3, 4}, now, replies);
+    out.clear();     deliver(ns, replies, {0}, now, out);
+    CHECK(ns[0].role() == raft::Role::Leader, "L leads term 1");
+    ns[0].propose("a"); ns[0].propose("b"); ns[0].propose("c");
+    now = 50; out.clear(); ns[0].tick(now, out);
+    stale.clear(); deliver(ns, out, {1}, now, stale);
+    CHECK(stale.size() == 1 && stale[0].aer && stale[0].aer->success &&
+              stale[0].aer->match_hint == 3,
+          "F's held reply acknowledges a,b,c");
+
+    // Term 2: M (empty log) leads with votes D, E; appends m1,m2 and ships
+    // them to L and D, so L's a,b,c are truncated away. M never hears back.
+    ns[2].restart(ns[2].stable(), now, 10);
+    now = 60; out.clear(); ns[2].tick(now, out);
+    replies.clear(); deliver(ns, out, {3, 4}, now, replies);
+    out.clear();     deliver(ns, replies, {2}, now, out);
+    CHECK(ns[2].role() == raft::Role::Leader && ns[2].term() == 2,
+          "M leads term 2");
+    ns[2].propose("m1"); ns[2].propose("m2");
+    now = 85; out.clear(); ns[2].tick(now, out);
+    replies.clear(); deliver(ns, out, {0, 3}, now, replies);
+    CHECK(ns[0].log().size() == 2 && ns[0].log()[0].cmd == "m1",
+          "L's a,b,c truncated under M");
+
+    // Term 3: L leads again with votes D, E (M hears of the term and stays
+    // a follower), appends x at index 3 -- the index F's held reply claims
+    // -- and ships it to D only: 2/5, uncommitted.
+    ns[0].restart(ns[0].stable(), now, 10);
+    now = 95; out.clear(); ns[0].tick(now, out);
+    replies.clear(); deliver(ns, out, {3, 4}, now, replies);
+    out.clear();     deliver(ns, replies, {0}, now, out);
+    CHECK(ns[0].role() == raft::Role::Leader && ns[0].term() == 3,
+          "L leads term 3");
+    replies.clear(); deliver(ns, out, {2}, now, replies);
+    ns[0].propose("x");
+    now = 120; out.clear(); ns[0].tick(now, out);
+    replies.clear(); deliver(ns, out, {3}, now, replies);
+    out.clear();     deliver(ns, replies, {0}, now, out);
+    CHECK(ns[0].commit_index() == 0, "x at 2/5 must be uncommitted");
+
+    // The held term-1 reply finally lands on the term-3 leader.
+    out.clear(); deliver(ns, stale, {0}, now, out);
+    CHECK(ns[0].commit_index() == 0,
+          "leader committed a current-term entry on a stale reply from an "
+          "earlier term");
+    ledger_check("after the stale reply");
+
+    // Why it is a safety bug and not a bookkeeping one: F, M, E elect M in
+    // term 4 without x, and M's next entry overwrites index 3 on L.
+    ns[2].restart(ns[2].stable(), now, 10);
+    now = 130; out.clear(); ns[2].tick(now, out);
+    replies.clear(); deliver(ns, out, {1, 4}, now, replies);
+    out.clear();     deliver(ns, replies, {2}, now, out);
+    CHECK(ns[2].role() == raft::Role::Leader && ns[2].term() == 4,
+          "M leads term 4");
+    ns[2].propose("y");
+    now = 155; out.clear(); ns[2].tick(now, out);
+    replies.clear(); deliver(ns, out, {0}, now, replies);
+    ledger_check("after M overwrote index 3");
+}
+
 // Figure 2 AE receiver rule 5 is min(leaderCommit, index of last new
 // entry). This leader always ships the full suffix, so the clamp is dead
 // code inside the closed system -- but Node::receive is public API, and a
@@ -399,8 +500,12 @@ static void unit_depose_deadline_reset() {
 }
 
 // Section 5.4.1's INDEX tiebreak: same last term, shorter log -> no vote.
-// (The term half of the comparison is pinned by figure8; this pins the
-// other half, which one lossy seed in 450 was the only thing catching.)
+// (This pins the index half, which one lossy seed in 450 was the only
+// thing catching. The TERM half is NOT pinned by figure8, despite what an
+// earlier comment here said: the mutation gate (mutants/raft-08) showed
+// that dropping it survived every seeded raft universe and unit_figure8;
+// it is pinned by unit_stale_ae_reply's term-4 election and by the
+// exchange chaos layer.)
 static void unit_uptodate_index() {
     raft::Node f(1, 3);
     raft::Persistent p;
@@ -739,7 +844,12 @@ static void bounds_failover(std::uint64_t seed, Bound& b) {
     REQUIRE(t0.has_value(), seed, "no initial leader");
     REQUIRE(c.propose("x"), seed, "refused");
     REQUIRE(c.run_for(200), seed, c.violation.c_str());
-    c.crash(c.leader());
+    // Not c.crash(c.leader()): a mutant that inflates terms can depose
+    // the leader between the election above and this line, and -1 as a
+    // node id is undefined behaviour rather than a detection.
+    int ld0 = c.leader();
+    REQUIRE(ld0 >= 0, seed, "leader deposed before the failover crash");
+    c.crash(ld0);
     auto t = c.run_until(
         [](const sim::Cluster& cc) { return cc.leader() >= 0; }, 900);
     REQUIRE(t.has_value(), seed,
@@ -774,6 +884,7 @@ static void bounds_heal(std::uint64_t seed, Bound& b) {
         [](const sim::Cluster& cc) { return cc.leader() >= 0; }, 900);
     REQUIRE(t0.has_value(), seed, "no leader");
     int ld = c.leader();
+    REQUIRE(ld >= 0, seed, "leader deposed before the heal partition");
     REQUIRE(c.propose("pre"), seed, "refused");
     REQUIRE(c.run_for(200), seed, c.violation.c_str());
     c.partition({ld});
@@ -802,6 +913,11 @@ static void bounds_heal(std::uint64_t seed, Bound& b) {
 // ---------------------------------------------------------------------------
 
 int main() {
+    // Unbuffered: if a later stage aborts (a mutant can drive the harness
+    // into one), buffered stdout is discarded and the FAIL lines printed
+    // minutes earlier vanish, which made a real named kill look like an
+    // unexplained crash in the mutation table.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     int before = failures;
     unit_figure8();
     unit_stale_ae_retransmission();
@@ -812,12 +928,13 @@ int main() {
     unit_grant_deadline_reset();
     unit_candidate_stepdown();
     unit_stale_vote_count();
+    unit_stale_ae_reply();
     unit_commit_clamp();
     unit_depose_deadline_reset();
     unit_uptodate_index();
     unit_minority_stall();
-    std::printf("%-14s figure8, stale-AE, apply+replay, votes x3, "
-                "quorums x3, timers x2, clamp: %s\n", "scripted",
+    std::printf("%-14s figure8, stale-AE, stale-AE-reply, apply+replay, "
+                "votes x3, quorums x3, timers x2, clamp: %s\n", "scripted",
                 failures == before ? "pass" : "FAILURES above");
 
     const int kSeeds = 150;
@@ -885,7 +1002,7 @@ int main() {
 
     if (failures == 0)
         std::printf("\nOK: %d seeded universes + scripted adversaries, "
-                    "invariants checked after every event\n", universes);
+                    "invariants checked after every tick\n", universes);
     else
         std::printf("\n%d FAILURES\n", failures);
     return failures ? 1 : 0;

@@ -5,8 +5,10 @@
 // event simulation where the network's every delay, drop, duplicate,
 // partition, and crash is a deterministic function of the seed. A failure
 // at seed 8571 is not a flaky test, it is a permanent reproduction.
-// Invariants are checked after EVERY event, not at the end, so a violation
-// is caught in the state that produced it.
+// Invariants are checked after EVERY simulation tick (5 virtual ms), not
+// at the end, so a violation is caught within one tick of the state that
+// produced it; the ledger and canon oracles have memory, so nothing that
+// happens inside a tick can hide behind re-convergence before the check.
 //
 // The oracles were shaped by mutation testing (see the README): checks with
 // no memory let the figure-8 bug survive thousands of random universes,
@@ -56,7 +58,19 @@ public:
     // Block the from->to direction only: the classic one-way link failure.
     void block_oneway(int from, int to) { cut_.insert({from, to}); }
     void heal() { island_.clear(); cut_.clear(); }
-    void crash(int id) { up_.erase(id); stable_[id] = nodes_[id].stable(); }
+    // crash(leader()) with no leader in office passes -1 straight into
+    // nodes_[]: undefined behaviour that a mutant can trigger and that
+    // then masquerades as a mutant kill (see mutants/README.md, raft-09).
+    // Refuse loudly, the way restart() does.
+    void crash(int id) {
+        if (id < 0 || id >= cfg_.n_nodes) {
+            violation = "harness misuse: crash of out-of-range node " +
+                        std::to_string(id);
+            return;
+        }
+        up_.erase(id);
+        stable_[id] = nodes_[id].stable();
+    }
     void restart(int id) {
         // Restarting a node that never crashed would silently wipe its
         // durable state (a disk-loss model nobody asked for), letting it
@@ -150,10 +164,58 @@ public:
     void set_restart_hook(RestartHook h) { restart_hook_ = std::move(h); }
 
 private:
+    // ---- portable bounded draws ------------------------------------------
+    // std::uniform_int_distribution and std::uniform_real_distribution are
+    // implementation-defined: libstdc++, libc++ and MSVC reduce the same
+    // mt19937_64 stream differently, so a seed used to reproduce only
+    // within one standard library. The two draws below are specified bit
+    // for bit, so "seed 8571" names the same universe on every toolchain.
+    // (libstdc++ happens to implement the same Lemire reduction, so on the
+    // g++ legs the integer draws are bit-identical to the old ones and the
+    // [0,1) draw differs only in last-bit rounding; libc++ and MSVC, which
+    // reduce differently, now agree with them.)
+    //
+    // uniform_in(lo, hi) is Lemire's nearly-divisionless method (Lemire,
+    // "Fast Random Integer Generation in an Interval", ACM TOMACS 2019):
+    // multiply a 64-bit draw by the range width n into a 128-bit product;
+    // the high 64 bits are the result, and the draw is rejected when the
+    // low 64 bits fall in [0, 2^64 mod n), which makes it exactly uniform.
+    // The product's high half is built from 32-bit limbs so no compiler
+    // extension (__int128, _umul128) is needed.
+    static std::uint64_t mul_hi64(std::uint64_t a, std::uint64_t b) {
+        const std::uint64_t mask = 0xffffffffULL;
+        std::uint64_t a_lo = a & mask, a_hi = a >> 32;
+        std::uint64_t b_lo = b & mask, b_hi = b >> 32;
+        std::uint64_t p0 = a_lo * b_lo;
+        std::uint64_t p1 = a_lo * b_hi;
+        std::uint64_t p2 = a_hi * b_lo;
+        std::uint64_t p3 = a_hi * b_hi;
+        std::uint64_t mid = (p0 >> 32) + (p1 & mask) + (p2 & mask);
+        return p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
+    }
+    // Uniform integer in the closed interval [lo, hi].
+    std::uint64_t uniform_in(std::uint64_t lo, std::uint64_t hi) {
+        if (hi <= lo) return lo;
+        std::uint64_t n = hi - lo + 1;
+        if (n == 0) return rng_();                 // the full 64-bit range
+        std::uint64_t x = rng_();
+        std::uint64_t low = x * n;                 // low 64 bits, wraps
+        if (low < n) {
+            std::uint64_t t = (0 - n) % n;         // 2^64 mod n
+            while (low < t) {
+                x = rng_();
+                low = x * n;
+            }
+        }
+        return lo + mul_hi64(x, n);
+    }
+    // Uniform double in [0, 1): the top 53 bits of one draw scaled by
+    // 2^-53, exact on every IEEE-754 platform.
+    double uniform_01() {
+        return static_cast<double>(rng_() >> 11) * (1.0 / 9007199254740992.0);
+    }
     std::uint64_t rand_timeout() {
-        std::uniform_int_distribution<std::uint64_t> d(cfg_.election_min_ms,
-                                                       cfg_.election_max_ms);
-        return d(rng_);
+        return uniform_in(cfg_.election_min_ms, cfg_.election_max_ms);
     }
     bool blocked(int from, int to) const {
         if (cut_.count({from, to})) return true;
@@ -180,19 +242,22 @@ private:
     }
 
     void enqueue(std::vector<raft::Message>& msgs) {
-        std::uniform_real_distribution<double> u(0.0, 1.0);
-        std::uniform_int_distribution<std::uint64_t> d(cfg_.min_delay_ms,
-                                                       cfg_.max_delay_ms);
         for (auto& m : msgs) {
             if (!up_.count(m.to) || blocked(m.from, m.to)) continue;
-            if (u(rng_) < cfg_.drop_prob) continue;
-            wire_.emplace(now_ + d(rng_), seq_++, m);
+            if (uniform_01() < cfg_.drop_prob) continue;
+            std::uint64_t delay = uniform_in(cfg_.min_delay_ms,
+                                             cfg_.max_delay_ms);
+            wire_.emplace(now_ + delay, seq_++, m);
             // The wire may duplicate: the copy takes an independent delay,
             // so a stale short retransmission can arrive AFTER a newer,
             // longer AppendEntries -- the interleaving that makes
             // truncate-on-first-conflict-only load-bearing.
-            if (cfg_.duplicate_prob > 0 && u(rng_) < cfg_.duplicate_prob)
-                wire_.emplace(now_ + d(rng_), seq_++, m);
+            if (cfg_.duplicate_prob > 0 &&
+                uniform_01() < cfg_.duplicate_prob) {
+                std::uint64_t dup_delay = uniform_in(cfg_.min_delay_ms,
+                                                     cfg_.max_delay_ms);
+                wire_.emplace(now_ + dup_delay, seq_++, m);
+            }
         }
     }
 
