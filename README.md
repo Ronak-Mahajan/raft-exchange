@@ -1,7 +1,5 @@
 # raft-exchange
 
-
-
 [![ci](https://github.com/Ronak-Mahajan/raft-exchange/actions/workflows/ci.yml/badge.svg)](https://github.com/Ronak-Mahajan/raft-exchange/actions/workflows/ci.yml)
 
 A distributed exchange built the hard way: a Raft consensus core written from
