@@ -99,7 +99,7 @@ and a suite worth trusting must fail. Two of the five mutants **survived
   flight, and the wire never duplicated. The stale-retransmission
   interleaving that truncation protects against was unrepresentable.
 
-A second round hunted NOVEL mutants after the first fixes landed, and found
+A second round hunted novel mutants after the first fixes landed, and found
 three more survivors. The sharpest was an Election Safety hole the network
 model structurally could not reach: dropping the term guard on vote
 counting (a candidate tallying granted replies from its *previous*
@@ -132,17 +132,17 @@ Every oracle in the current suite exists because a mutant demanded it:
    retransmission, driven message by message, because some interleavings
    deserve a guaranteed appearance rather than a probabilistic one.
 
-The same review fixed three real (non-mutant) findings: an isolated node
-re-elected forever with a frozen timeout, because the simulator only redrew
-randomized timeouts on message receipt and the moment elections matter is
-precisely when messages have stopped (now redrawn before every tick); a
-deposed leader kept
-its long-expired election deadline and immediately fired a disruptive
-election (now waits a full randomized timeout); and single-node clusters
-could never commit because commit advancement only ran in the reply handler
-(now also runs at propose time).
+The same scenarios pin three liveness behaviours, each one a place where a
+plausible implementation stalls. Randomized election timeouts are redrawn
+before every tick rather than on message receipt, because the moment
+elections matter is precisely when messages have stopped, and an isolated
+node holding a frozen timeout re-elects forever. A deposed leader waits a
+full randomized timeout instead of firing on its long-expired deadline,
+which would turn every demotion into a disruptive election. Commit
+advancement runs at propose time as well as in the reply handler, without
+which a single-node cluster can never commit at all.
 
-### Mutation testing is an artifact, not a story
+### The mutation gate is a committed artifact
 
 The mutants live in `mutants/`: twenty-four unified-diff patches, twelve
 against `src/raft.hpp` and twelve against `src/exchange.hpp`, each with a
@@ -159,14 +159,12 @@ this file:
 bash mutants/run.sh        # 24 / 24 killed, 185 s on 8 jobs (g++ 16.1)
 ```
 
-The table records *how* each mutant died, not just that it did. All 24 die
+The table records *how* each mutant died, not only that it did. All 24 die
 as `killed/assert`: a named `FAIL` line and exit 1. That distinction is
-load-bearing — a mutant that only ever kills by segfaulting has not shown
-that any rule is pinned, it has shown that undefined behaviour is
-reachable. Two mutants have been caught doing exactly that; one was
-rejected and replaced, and one turned out to be a genuine assertion kill
-whose diagnosis was being swallowed by a buffered `stdout` on abort. Both
-are written up in `mutants/README.md`.
+load-bearing, because a mutant that only ever kills by segfaulting has not
+shown that any rule is pinned, it has shown that undefined behaviour is
+reachable. `mutants/README.md` carries the kill category per mutant and the
+one coverage gap the gate does not close.
 
 Building the gate found a third-round survivor. Dropping the term guard on
 AppendEntries *replies* (a re-elected leader counting a success reply from
@@ -174,15 +172,13 @@ its own earlier term) passed all 4,550 seeded universes and the 450
 exchange universes: the interleaving needs one reply delayed across two
 leader changes with a partial replication in between, which no wire
 configuration produces. `unit_stale_ae_reply` now scripts it, and the
-ledger shows the resulting overwrite. The table also corrected a comment:
-dropping the *term* half of the up-to-date vote check was not pinned by
-the figure-8 test as `test_raft.cpp` claimed, nor by any seeded Raft
-universe; the exchange chaos layer reached it (seed 14, n = 3), and the
-new scripted test now pins it as well. Both are recorded in
-`mutants/README.md`. The
-first two rounds (a 1,000-universe suite, survivors at 8,000 and 3,950
-universes) predate this repository's first commit and cannot be replayed;
-the current table can.
+ledger shows the resulting overwrite. The table also placed a second rule:
+dropping the *term* half of the up-to-date vote check is caught neither by
+the figure-8 test nor by any seeded Raft universe; the exchange chaos layer
+reaches it (seed 14, n = 3), and the new scripted test pins it as well.
+Both are recorded in `mutants/README.md`. The first two rounds (a
+1,000-universe suite, survivors at 8,000 and 3,950 universes) predate this
+repository's first commit and cannot be replayed; the current table can.
 
 ## Why simulation instead of unit tests
 
@@ -209,12 +205,13 @@ draw for [0, 1). They do not go through `std::uniform_int_distribution`,
 whose algorithm is implementation-defined and differs across libstdc++,
 libc++ and MSVC. So seed 8571 names the same universe on every toolchain in
 the CI matrix, which includes a libc++ leg for exactly that reason. One
-honest footnote on the switch: libstdc++ happens to implement the same
-Lemire reduction, so on the g++ legs the integer draws are bit-identical to
-what the standard distribution produced (checked directly: 0 of 10,000
-draws differ) and the trajectories, liveness maxima included, are
-unchanged. libc++ and MSVC reduce differently, so on those toolchains the
-same seed used to name a different universe; now it names the g++ one.
+footnote on the reduction: libstdc++ happens to implement the same Lemire
+method, so on the g++ legs the integer draws are bit-identical to what the
+standard distribution yields (checked directly: 0 of 10,000 draws differ)
+and the trajectories, liveness maxima included, match it. libc++ and MSVC
+reduce differently, which is why the reduction is specified here rather
+than delegated: without it, the same seed would name a different universe
+on those toolchains.
 
 Known limitation, on purpose: under a one-way link failure (leader can
 send, cannot hear), basic Raft livelocks: the deaf leader's heartbeats
@@ -249,33 +246,34 @@ written for this repository. It shares no code with
 [hft-lob](https://github.com/Ronak-Mahajan/hft-lob), which is an ITCH 5.0
 L2 book reconstructor with no matching path; the two answer different
 questions (how fast can a book be rebuilt from a feed, versus can a book be
-replicated so that every replica agrees). Here determinism is not a
-performance trick, it is the correctness foundation. The simulator drives
-the engine through per-node apply/restart hooks,
-so the state-machine-safety oracle gets teeth: the books must agree at
-every applied position, on every replica, through crashes, replays,
-partitions, and reordered wires. Client-session
-deduplication (exactly-once submission across leader failover) is
-deliberately not here yet; today a resubmitted order id is rejected
-deterministically, and sessions belong to Phase C.
+replicated so that every replica agrees). Determinism here is a correctness
+requirement rather than a performance trick. The simulator drives the
+engine through per-node apply and restart hooks, so the
+state-machine-safety oracle gets teeth: the books must agree at every
+applied position, on every replica, through crashes, replays, partitions,
+and reordered wires. Client-session deduplication (exactly-once submission
+across leader failover) is deliberately not here yet; today a resubmitted
+order id is rejected deterministically, and sessions belong to Phase C.
 
 The engine went through the same adversarial treatment as the consensus
-core, and the first version failed it in instructive ways. A review found
-the state hash was forgeable (level sentinels could be impersonated by
-client-chosen order ids, giving two observably different books one hash;
-fixed with count-prefix framing), that `operator>>` parsing consults the process
-global locale (two identical binaries can diverge on the same bytes; fixed
-with a hand-rolled digits-only parser and a canonical grammar), and that
-unbounded quantities made volume arithmetic undefined behavior (fixed with
-admission bounds). Mutation testing then showed the chaos layer has zero
-matching-semantics killing power on its own (every replica runs the same
-mutated binary and diverges identically, so all semantic coverage lives in
-the unit layer) and that the unit layer had six blind spots, the
-sharpest being the one-character sell-side mirror of a fully-pinned
-buy-side rule. All twelve engine mutants now die, an uncrossed-book
-invariant runs in every chaos universe, hostile commands flow through the
-replicated path, and a golden-vector test with a compiled-in expected hash
-turns any cross-build drift into a local unit failure.
+core, and three of its rules exist because the obvious implementation of
+each is silently wrong. The state hash uses count-prefix framing, without
+which level sentinels can be impersonated by client-chosen order ids and
+two observably different books collapse to one hash. Parsing is a
+hand-rolled digits-only reader over a canonical grammar rather than
+`operator>>`, which consults the process global locale and lets two
+identical binaries diverge on the same bytes. Admission bounds keep
+quantities inside the range where volume arithmetic is defined.
+
+Mutation testing then showed the chaos layer has zero matching-semantics
+killing power on its own: every replica runs the same mutated binary and
+diverges identically, so all semantic coverage lives in the unit layer,
+where it found six blind spots. The sharpest was the one-character
+sell-side mirror of a fully-pinned buy-side rule. All twelve engine mutants
+now die, an uncrossed-book invariant runs in every chaos universe, hostile
+commands flow through the replicated path, and a golden-vector test with a
+compiled-in expected hash turns any cross-build drift into a local unit
+failure.
 
 ## Roadmap
 
