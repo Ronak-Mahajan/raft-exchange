@@ -121,19 +121,22 @@ public:
     std::vector<Entry> take_applicable() {
         std::vector<Entry> out;
         while (last_applied_ < commit_) {
-            out.push_back(p_.log[static_cast<size_t>(last_applied_)]);
+            out.push_back(p_.log.at(static_cast<size_t>(last_applied_)));
             ++last_applied_;
         }
         return out;
     }
 
 private:
+    // Every element access in this class is checked (at()), so an index
+    // error is a std::out_of_range that the test harness reports as a
+    // named failure, never undefined behaviour.
     Index last_index() const { return p_.log.size(); }
     Term last_term() const {
         return p_.log.empty() ? 0 : p_.log.back().term;
     }
     Term term_at(Index i) const {           // i is 1-based, 0 -> term 0
-        return i == 0 ? 0 : p_.log[static_cast<size_t>(i - 1)].term;
+        return i == 0 ? 0 : p_.log.at(static_cast<size_t>(i - 1)).term;
     }
 
     void become_follower(Term t, std::uint64_t now_ms) {
@@ -157,7 +160,7 @@ private:
         ++p_.current_term;
         p_.voted_for = id_;
         votes_.assign(n_, false);
-        votes_[id_] = true;
+        votes_.at(id_) = true;
         deadline_ = now_ms + timeout_ms_;
         for (NodeId peer = 0; peer < n_; ++peer) {
             if (peer == id_) continue;
@@ -174,7 +177,7 @@ private:
         role_ = Role::Leader;
         next_.assign(n_, last_index() + 1);
         match_.assign(n_, 0);
-        match_[id_] = last_index();
+        match_.at(id_) = last_index();
         // Deliberately NO term-start no-op entry (a dissertation
         // recommendation, not a figure-2 rule): inherited uncommitted
         // entries wait for the next client proposal, since 5.4.2 forbids
@@ -196,7 +199,7 @@ private:
         heartbeat_due_ = now_ms + kHeartbeatMs;
         for (NodeId peer = 0; peer < n_; ++peer) {
             if (peer == id_) continue;
-            Index prev = next_[peer] - 1;
+            Index prev = next_.at(peer) - 1;
             Message m;
             m.from = id_; m.to = peer;
             AppendEntries ae;
@@ -204,8 +207,8 @@ private:
             ae.leader = id_;
             ae.prev_log_index = prev;
             ae.prev_log_term = term_at(prev);
-            for (Index i = next_[peer]; i <= last_index(); ++i)
-                ae.entries.push_back(p_.log[static_cast<size_t>(i - 1)]);
+            for (Index i = next_.at(peer); i <= last_index(); ++i)
+                ae.entries.push_back(p_.log.at(static_cast<size_t>(i - 1)));
             ae.leader_commit = commit_;
             m.ae = std::move(ae);
             out.push_back(m);
@@ -222,7 +225,7 @@ private:
             if (term_at(n) != p_.current_term) break;
             int cnt = 0;
             for (NodeId peer = 0; peer < n_; ++peer)
-                cnt += (match_[peer] >= n);
+                cnt += (match_.at(peer) >= n);
             if (cnt * 2 > n_) { commit_ = n; break; }
         }
     }
@@ -257,7 +260,7 @@ inline void Node::tick(std::uint64_t now_ms, std::vector<Message>& out) {
 inline std::optional<Index> Node::propose(const std::string& cmd) {
     if (role_ != Role::Leader) return std::nullopt;
     p_.log.push_back(Entry{p_.current_term, cmd});
-    match_[id_] = last_index();
+    match_.at(id_) = last_index();
     advance_commit();                      // no-op unless n = 1
     return last_index();
 }
@@ -296,7 +299,7 @@ inline void Node::receive(const Message& m, std::uint64_t now_ms,
         }
         if (role_ == Role::Candidate && r.term == p_.current_term &&
             r.granted) {
-            votes_[m.from] = true;
+            votes_.at(m.from) = true;
             maybe_win(now_ms, out);
         }
         return;
@@ -354,9 +357,9 @@ inline void Node::receive(const Message& m, std::uint64_t now_ms,
         }
         if (role_ != Role::Leader || r.term != p_.current_term) return;
         if (r.success) {
-            if (r.match_hint > match_[m.from]) {
-                match_[m.from] = r.match_hint;
-                next_[m.from] = r.match_hint + 1;
+            if (r.match_hint > match_.at(m.from)) {
+                match_.at(m.from) = r.match_hint;
+                next_.at(m.from) = r.match_hint + 1;
             }
             advance_commit();
         } else {
@@ -364,7 +367,7 @@ inline void Node::receive(const Message& m, std::uint64_t now_ms,
             // confirmed match: a delayed duplicate of an old failure reply
             // must not pin next_ under match_+1 and cause the leader to
             // re-ship the same suffix on every heartbeat forever.
-            if (next_[m.from] > match_[m.from] + 1) --next_[m.from];
+            if (next_.at(m.from) > match_.at(m.from) + 1) --next_.at(m.from);
         }
         return;
     }

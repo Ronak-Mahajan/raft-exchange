@@ -12,6 +12,8 @@
 // included. That is the property that makes a replicated exchange an
 // exchange.
 #include <cstdio>
+#include <cstdlib>
+#include <exception>
 #include <random>
 #include <set>
 #include <string>
@@ -23,20 +25,48 @@
 static int failures = 0;
 static int g_n = 0;
 
+// SUITE_FAIL_FAST=1 ends the run at the first failure (exit 1); the
+// generated mutation sweep, scripts/mutation_sweep.sh, sets it.
+static bool fail_fast() {
+    static const bool on = [] {
+        const char* v = std::getenv("SUITE_FAIL_FAST");
+        return v != nullptr && v[0] == '1';
+    }();
+    return on;
+}
+static void failed() {
+    ++failures;
+    if (fail_fast()) std::exit(1);
+}
+
 #define REQUIRE(cond, seed, what)                                            \
     do {                                                                     \
         if (!(cond)) {                                                       \
             std::printf("FAIL seed=%llu n=%d: %s\n",                         \
                         (unsigned long long)(seed), g_n, what);              \
-            ++failures;                                                      \
+            failed();                                                        \
             return;                                                          \
         }                                                                    \
     } while (0)
 
 #define CHECK(cond, what)                                          \
     do {                                                           \
-        if (!(cond)) { std::printf("FAIL: %s\n", what); ++failures; } \
+        if (!(cond)) { std::printf("FAIL: %s\n", what); failed(); } \
     } while (0)
+
+// The Raft core indexes with at(); an exception from it (or from a
+// mutant) is reported as a named failure of the test or universe that
+// raised it, as in test_raft.cpp.
+template <class Fn>
+static void run_unit(const char* name, Fn fn) {
+    try {
+        fn();
+    } catch (const std::exception& e) {
+        std::printf("FAIL: %s threw %s\n", name, e.what());
+        failed();
+    }
+}
+#define UNIT(fn) run_unit(#fn, fn)
 
 // ---------------------------------------------------------------------------
 // Layer 1: matching semantics.
@@ -316,15 +346,15 @@ int main() {
     // unexplained crash in the mutation table.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     int before = failures;
-    unit_price_time_priority();
-    unit_sell_at_bid();
-    unit_fifo_within_level();
-    unit_cancel();
-    unit_accounting();
-    unit_hash_covers_fills();
-    unit_deterministic_rejection();
-    unit_golden_vector();
-    unit_replay_determinism();
+    UNIT(unit_price_time_priority);
+    UNIT(unit_sell_at_bid);
+    UNIT(unit_fifo_within_level);
+    UNIT(unit_cancel);
+    UNIT(unit_accounting);
+    UNIT(unit_hash_covers_fills);
+    UNIT(unit_deterministic_rejection);
+    UNIT(unit_golden_vector);
+    UNIT(unit_replay_determinism);
     std::printf("%-14s price-time both sides, FIFO, cancel+reuse, "
                 "accounting, hash, grammar, golden, replay: %s\n",
                 "engine units",
@@ -336,7 +366,13 @@ int main() {
     for (int n : {3, 5, 7}) {
         g_n = n;
         for (std::uint64_t seed = 1; seed <= kSeeds; ++seed) {
-            scenario_replicated_book(seed, n);
+            try {
+                scenario_replicated_book(seed, n);
+            } catch (const std::exception& e) {
+                std::printf("FAIL seed=%llu n=%d: replicated_book threw %s\n",
+                            (unsigned long long)seed, n, e.what());
+                failed();
+            }
             ++universes;
         }
     }

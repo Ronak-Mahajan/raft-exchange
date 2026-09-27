@@ -12,6 +12,9 @@
 // 3. Liveness bounds: elections and commits must not merely happen, they
 //    must happen within a deadline, measured in virtual milliseconds.
 #include <cstdio>
+#include <cstdlib>
+#include <exception>
+#include <map>
 #include <random>
 #include <set>
 #include <string>
@@ -22,20 +25,61 @@
 static int failures = 0;
 static int g_n = 0;                    // cluster size under test, for repro
 
+// SUITE_FAIL_FAST=1 ends the run at the first failure (exit 1). The
+// generated mutation sweep, scripts/mutation_sweep.sh, sets it: it needs
+// the first named failure, not the full report.
+static bool fail_fast() {
+    static const bool on = [] {
+        const char* v = std::getenv("SUITE_FAIL_FAST");
+        return v != nullptr && v[0] == '1';
+    }();
+    return on;
+}
+static void failed() {
+    ++failures;
+    if (fail_fast()) std::exit(1);
+}
+
 #define REQUIRE(cond, seed, what)                                            \
     do {                                                                     \
         if (!(cond)) {                                                       \
             std::printf("FAIL seed=%llu n=%d: %s\n",                         \
                         (unsigned long long)(seed), g_n, what);              \
-            ++failures;                                                      \
+            failed();                                                        \
             return;                                                          \
         }                                                                    \
     } while (0)
 
 #define CHECK(cond, what)                                          \
     do {                                                           \
-        if (!(cond)) { std::printf("FAIL: %s\n", what); ++failures; } \
+        if (!(cond)) { std::printf("FAIL: %s\n", what); failed(); } \
     } while (0)
+
+// The core indexes its vectors with at(), so an index error in it (or in
+// a mutant of it) arrives here as a std::exception. It is reported as a
+// named failure of the scripted test or universe that raised it, and the
+// run continues with the next one.
+template <class Fn>
+static void run_unit(const char* name, Fn fn) {
+    try {
+        fn();
+    } catch (const std::exception& e) {
+        std::printf("FAIL: %s threw %s\n", name, e.what());
+        failed();
+    }
+}
+#define UNIT(fn) run_unit(#fn, fn)
+
+template <class Fn>
+static void run_universe(const char* name, std::uint64_t seed, Fn fn) {
+    try {
+        fn();
+    } catch (const std::exception& e) {
+        std::printf("FAIL seed=%llu n=%d: %s threw %s\n",
+                    (unsigned long long)seed, g_n, name, e.what());
+        failed();
+    }
+}
 
 using raft::Message;
 using MsgVec = std::vector<Message>;
@@ -79,7 +123,7 @@ static void unit_figure8() {
                     std::printf("FAIL: committed entry overwritten at idx "
                                 "%llu (%s)\n",
                                 (unsigned long long)i, where);
-                    ++failures;
+                    failed();
                     return;
                 }
             }
@@ -378,7 +422,7 @@ static void unit_stale_ae_reply() {
                     std::printf("FAIL: committed entry overwritten at idx "
                                 "%llu (%s)\n",
                                 (unsigned long long)i, where);
-                    ++failures;
+                    failed();
                     return;
                 }
             }
@@ -918,20 +962,20 @@ int main() {
     // unexplained crash in the mutation table.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     int before = failures;
-    unit_figure8();
-    unit_stale_ae_retransmission();
-    unit_apply_and_replay();
-    unit_double_vote();
-    unit_single_node();
-    unit_elect_quorum();
-    unit_grant_deadline_reset();
-    unit_candidate_stepdown();
-    unit_stale_vote_count();
-    unit_stale_ae_reply();
-    unit_commit_clamp();
-    unit_depose_deadline_reset();
-    unit_uptodate_index();
-    unit_minority_stall();
+    UNIT(unit_figure8);
+    UNIT(unit_stale_ae_retransmission);
+    UNIT(unit_apply_and_replay);
+    UNIT(unit_double_vote);
+    UNIT(unit_single_node);
+    UNIT(unit_elect_quorum);
+    UNIT(unit_grant_deadline_reset);
+    UNIT(unit_candidate_stepdown);
+    UNIT(unit_stale_vote_count);
+    UNIT(unit_stale_ae_reply);
+    UNIT(unit_commit_clamp);
+    UNIT(unit_depose_deadline_reset);
+    UNIT(unit_uptodate_index);
+    UNIT(unit_minority_stall);
     std::printf("%-14s figure8, stale-AE, stale-AE-reply, apply+replay, "
                 "votes x3, quorums x3, timers x2, clamp: %s\n", "scripted",
                 failures == before ? "pass" : "FAILURES above");
@@ -954,7 +998,7 @@ int main() {
         for (int n : sizes) {
             g_n = n;
             for (std::uint64_t seed = 1; seed <= kSeeds; ++seed) {
-                s.fn(seed, n);
+                run_universe(s.name, seed, [&] { s.fn(seed, n); });
                 ++universes;
             }
         }
@@ -965,7 +1009,8 @@ int main() {
     before = failures;
     g_n = 4;
     for (std::uint64_t seed = 1; seed <= 150; ++seed) {
-        scenario_even_split(seed, 4);
+        run_universe("even_split", seed,
+                     [&] { scenario_even_split(seed, 4); });
         ++universes;
     }
     std::printf("%-14s n=4 x 150 seeds, %s\n", "even_split",
@@ -974,7 +1019,8 @@ int main() {
     before = failures;
     g_n = 5;
     for (std::uint64_t seed = 1; seed <= 250; ++seed) {
-        scenario_timing_stress(seed, 5);
+        run_universe("timing_stress", seed,
+                     [&] { scenario_timing_stress(seed, 5); });
         ++universes;
     }
     std::printf("%-14s 250 seeds, %s (safety only: liveness is forfeit "
@@ -986,10 +1032,10 @@ int main() {
     Bound cold, fo, cm, hl;
     g_n = 5;
     for (std::uint64_t seed = 1; seed <= 250; ++seed) {
-        bounds_cold_start(seed, cold);
-        bounds_failover(seed, fo);
-        bounds_commit(seed, cm);
-        bounds_heal(seed, hl);
+        run_universe("cold_start", seed, [&] { bounds_cold_start(seed, cold); });
+        run_universe("failover", seed, [&] { bounds_failover(seed, fo); });
+        run_universe("commit", seed, [&] { bounds_commit(seed, cm); });
+        run_universe("heal", seed, [&] { bounds_heal(seed, hl); });
         universes += 4;
     }
     std::printf("%-14s 250 seeds, virtual ms: cold-start max %llu <= 900, "
