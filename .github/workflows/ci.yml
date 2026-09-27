@@ -44,8 +44,9 @@ jobs:
             flags: ""
             apt: ""
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
       - name: install extra packages
@@ -80,15 +81,16 @@ jobs:
     # by at least one suite. A survivor, an unappliable patch, or a mutant
     # that does not compile fails the build. See mutants/README.md.
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
       - name: run the mutant table
         shell: bash
         env:
           CXX: g++-13
-          MUTANT_TIMEOUT: "300"   # per suite per mutant; keeps the job well under 10 min
+          MUTANT_TIMEOUT: "300"   # per suite per mutant; timeout-minutes caps the whole job
         run: |
           bash mutants/run.sh 2>&1 | tee -a ci.log; exit ${PIPESTATUS[0]}
       - name: upload failure log
