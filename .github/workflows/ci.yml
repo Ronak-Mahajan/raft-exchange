@@ -4,7 +4,7 @@ on:
     branches: ['**']
   pull_request:
 permissions:
-  contents: write
+  contents: read
 jobs:
   test:
     # Five toolchain/stdlib legs on two platforms. The golden-vector test
@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          persist-credentials: false
       - name: install extra packages
         if: matrix.apt != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
@@ -66,23 +66,14 @@ jobs:
             ./test_raft
             ./test_exchange
           } 2>&1 | tee -a ci.log; exit ${PIPESTATUS[0]}
-      - name: commit failure log
-        if: failure() && github.ref != 'refs/heads/main'
-        shell: bash
-        run: |
-          mkdir -p .ci
-          out=".ci/last-failure-test-${{ matrix.name }}.log"
-          if [ -f ci.log ]; then tail -c 60000 ci.log > "$out"; else echo "no ci.log captured (failed before the build step)" > "$out"; fi
-          git config user.name "ci-bot"
-          git config user.email "ci-bot@users.noreply.github.com"
-          git add .ci
-          git commit -m "ci: failure log [skip ci]" \
-            -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>" || exit 0
-          for i in 1 2 3 4 5; do
-            if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then exit 0; fi
-            sleep $((i * 5))
-          done
-          exit 1
+      - name: upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-log-${{ matrix.name }}
+          path: ci.log
+          if-no-files-found: ignore
+          retention-days: 14
 
   mutants:
     # Mutation gate: every patch in mutants/ must apply, build, and be killed
@@ -92,7 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          persist-credentials: false
       - name: run the mutant table
         shell: bash
         env:
@@ -100,20 +91,11 @@ jobs:
           MUTANT_TIMEOUT: "300"   # per suite per mutant; keeps the job well under 10 min
         run: |
           bash mutants/run.sh 2>&1 | tee -a ci.log; exit ${PIPESTATUS[0]}
-      - name: commit failure log
-        if: failure() && github.ref != 'refs/heads/main'
-        shell: bash
-        run: |
-          mkdir -p .ci
-          out=".ci/last-failure-mutants.log"
-          if [ -f ci.log ]; then tail -c 60000 ci.log > "$out"; else echo "no ci.log captured (failed before the run step)" > "$out"; fi
-          git config user.name "ci-bot"
-          git config user.email "ci-bot@users.noreply.github.com"
-          git add .ci
-          git commit -m "ci: failure log [skip ci]" \
-            -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>" || exit 0
-          for i in 1 2 3 4 5; do
-            if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then exit 0; fi
-            sleep $((i * 5))
-          done
-          exit 1
+      - name: upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-log-mutants
+          path: ci.log
+          if-no-files-found: ignore
+          retention-days: 14
