@@ -120,3 +120,31 @@ jobs:
           path: ci.log
           if-no-files-found: ignore
           retention-days: 14
+
+  sweep:
+    # Generated mutation sweep: every relational-operator swap and every
+    # single-statement deletion in the function bodies of src/raft.hpp and
+    # src/exchange.hpp, run against both suites. A mutant that both suites
+    # pass fails the build unless scripts/sweep_equivalent.txt explains why
+    # no test can tell it apart, and a stale annotation fails it too. See
+    # scripts/mutation_sweep.sh.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: run the sweep
+        shell: bash
+        env:
+          CXX: g++-13
+        run: |
+          bash scripts/mutation_sweep.sh 2>&1 | tee -a ci.log; exit ${PIPESTATUS[0]}
+      - name: upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-log-sweep
+          path: ci.log
+          if-no-files-found: ignore
+          retention-days: 14

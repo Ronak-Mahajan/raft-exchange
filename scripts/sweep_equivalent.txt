@@ -1,0 +1,73 @@
+# scripts/sweep_equivalent.txt - generated mutants that no test can kill.
+#
+# scripts/mutation_sweep.sh fails on every mutant that both suites pass,
+# unless its key is listed here with the reason the mutant cannot change
+# what the program does. A key line is the 10-digit key, then the reason.
+# The comment above each key names the mutant; the key itself does not
+# depend on line numbers. The sweep also fails if a key listed here is
+# killed or is no longer generated, so this file cannot go stale.
+
+# ---- src/raft.hpp ----------------------------------------------------------
+
+# restart(): delete "leader_hint_ = -1;"
+606ab9458b  leader_hint_ is written but never read.
+# receive(), AppendEntries: delete "leader_hint_ = r.leader;"
+d4811e71b4  leader_hint_ is written but never read.
+# send_heartbeats(): delete "ae.leader = id_;"
+e71969c222  AppendEntries::leader only feeds leader_hint_, which is never read.
+
+# restart(): delete "votes_.assign(n_, false);"
+91c10d490b  votes_ is read only by a candidate, and start_election() assigns it before a node becomes one.
+# restart(): delete "next_.assign(n_, 1);"
+9021852120  next_ is read only by a leader, and become_leader() assigns it before a node becomes one.
+# restart(): delete "match_.assign(n_, 0);"
+a5ab627c0e  match_ is read only for a leader (propose(), the AppendEntries reply handler, match_index() in the simulator), and become_leader() assigns it before a node becomes one.
+
+# become_follower(): "t > p_.current_term" becomes ">="
+f13c5c90f1  every caller has already checked that t is greater than current_term, so t == current_term never reaches this test.
+
+# become_leader(): delete "match_.at(id_) = last_index();"
+f4d8a29af3  the leader's own match is read only by advance_commit(), which commits nothing until the leader holds an entry of its own term, and propose() sets it when it appends that entry.
+# become_leader(): delete "heartbeat_due_ = now_ms;"
+423e4f7679  send_heartbeats(), called on the next line, sets heartbeat_due_ before anything reads it.
+
+# advance_commit(): "n > commit_" becomes ">="
+4efdd5f4b1  at n == commit_ the body either breaks on the term check or sets commit_ to its own value, and the loop then ends; at n == 0, term_at(0) is 0, never a leader's term, so it breaks before --n can wrap.
+# advance_commit(): delete "break;" after "commit_ = n;"
+5836d6636f  once commit_ = n, the loop condition n - 1 > commit_ is false, so the loop ends anyway.
+
+# receive(), RequestVote: delete the final "return;"
+39a66193dc  a Message carries exactly one RPC, so none of the handlers after this one runs.
+# receive(), RequestVote reply with a higher term: delete "return;"
+b3ac06c548  the node has just become a follower, so the candidate branch that follows does not run.
+# receive(), RequestVote reply: delete the final "return;"
+98c4b8dfb3  a Message carries exactly one RPC, so none of the handlers after this one runs.
+
+# receive(), AppendEntries: "r.term > p_.current_term" becomes ">="
+9037338eda  at an equal term, become_follower() leaves a follower unchanged and does to a candidate exactly what the lines below do (step down, re-arm the election timer); a leader never receives an AppendEntries of its own term, since a term has at most one leader.
+# receive(), AppendEntries from a stale term: delete "ar.success = false;"
+7a70a1e8f7  AppendEntriesReply::success is initialised to false.
+# receive(), AppendEntries that fails the consistency check: delete "ar.success = false;"
+d261657d5e  AppendEntriesReply::success is initialised to false.
+# receive(), AppendEntries: "r.leader_commit > commit_" becomes ">="
+ea898d2f89  with leader_commit == commit_, min(leader_commit, max(cap, commit_)) is commit_ again.
+# receive(), AppendEntries: delete "if (commit_ > last_index()) commit_ = last_index();"
+5e20650693  the line above bounds commit_ by max(cap, commit_): cap is the last index the append loop wrote, and the old commit_ is inside the log because a leader never makes a follower truncate a committed entry (the ledger invariant).
+# receive(), AppendEntries: "commit_ > last_index()" becomes ">="
+83eed8c93f  when commit_ == last_index() the assignment stores the value it already has.
+# receive(), AppendEntries: delete the final "return;"
+85154ecc8b  a Message carries exactly one RPC, so the handler after this one does not run.
+
+# receive(), AppendEntries reply with a higher term: delete "return;"
+cd90d0a319  the node has just become a follower, so the leader-only guard that follows returns.
+# receive(), AppendEntries reply: "r.match_hint > match_.at(m.from)" becomes ">="
+1270ace3dd  an equal match_hint rewrites the same values: after a peer's first success in a term next_ is match_ + 1 and stays so; before it, match_ is 0 and a success with match_hint 0 answers an AppendEntries sent at next_ = 1, which no refusal can lower.
+# receive(): delete the final "return;"
+bace39c829  it is the last statement of the function.
+
+# ---- src/exchange.hpp ------------------------------------------------------
+
+# apply(): delete "if (p == end) { note_reject(); return fills; }"
+d6f650f272  an empty command then reads the string's terminating '\0' as the op, which the final else rejects and counts in the same way.
+# take(): "qty < maker.qty" becomes "<="
+244684c0a6  when qty == maker.qty the two arms of the conditional are equal.
