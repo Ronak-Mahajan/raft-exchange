@@ -4,8 +4,8 @@
 # breaks: maybe_win() accepts exactly half the votes, so on an even cluster two
 #         candidates with 2/4 each are both elected in the same term
 # expected killer: test_raft unit_elect_quorum (n=2 self-vote, n=4 split brain);
-#                  scenario even_split (n=4 partitioned 2-2, test_raft.cpp:680-)
-#                  via "half a cluster elected a new leader without quorum"
+#                  scenario_even_split (n=4 partitioned 2-2) via "half a
+#                  cluster elected a new leader without quorum"
 # provenance: reconstructed (README round 2 "every seeded cluster size was odd,
 #             where > and >= majorities coincide, which hid an election-quorum
 #             off-by-one")

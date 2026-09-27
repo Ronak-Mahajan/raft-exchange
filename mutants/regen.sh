@@ -62,10 +62,11 @@ emit raft-01-figure8-commit-older-term-by-count src/raft.hpp \
 # breaks: advance_commit() drops the term guard, so an older-term entry is
 #         committed by replica count alone -- the canonical figure-8 bug; a
 #         later leader without that entry can erase it after it was "committed"
-# expected killer: test_raft unit_figure8 (ledger oracle, test_raft.cpp:58-60);
-#                  the seeded partition/crash scenarios via invariant 3 (ledger)
+# expected killer: test_raft unit_figure8 (ledger oracle, the comment above
+#                  unit_figure8); the seeded partition/crash scenarios via
+#                  invariant 3 (ledger)
 # provenance: reconstructed (README "Deleting the figure-8 guard", round 1
-#             survivor at 8,000 universes; test_raft.cpp:4-6)'
+#             survivor at 8,000 universes; the test_raft.cpp file header)'
 
 emit raft-02-blind-truncation-at-prev-index src/raft.hpp \
 's/\Q                Index idx = r.prev_log_index;
@@ -85,11 +86,11 @@ emit raft-02-blind-truncation-at-prev-index src/raft.hpp \
 # breaks: the follower discards everything after prevLogIndex on every
 #         AppendEntries, so a stale-but-valid retransmission carrying a shorter
 #         prefix erases already-appended (even committed) entries
-# expected killer: test_raft unit_stale_ae_retransmission (test_raft.cpp:154-156);
-#                  scenario reorder_dup (delays > heartbeat + duplication) via
-#                  invariant 2 (commit beyond log) or 3 (ledger)
+# expected killer: test_raft unit_stale_ae_retransmission (and the comment
+#                  above it); scenario reorder_dup (delays > heartbeat +
+#                  duplication) via invariant 2 (commit beyond log) or 3 (ledger)
 # provenance: reconstructed (README "Blind log truncation", round 1 survivor;
-#             test_raft.cpp:574-575)'
+#             the comment above scenario_reorder_duplicate)'
 
 emit raft-03-stale-vote-counted-across-terms src/raft.hpp \
 's/\Q        if (role_ == Role::Candidate && r.term == p_.current_term &&
@@ -101,9 +102,9 @@ emit raft-03-stale-vote-counted-across-terms src/raft.hpp \
 # breaks: the candidate tallies any granted reply regardless of its term, so
 #         yesterday'"'"'s votes delayed past the election timeout can elect a
 #         leader with no current-term majority (Election Safety hole)
-# expected killer: test_raft unit_stale_vote_count (test_raft.cpp:326-330);
-#                  scenario slow_wire (400 ms delays > election timeout,
-#                  test_raft.cpp:660-664) via invariant 1 (two leaders in a term)
+# expected killer: test_raft unit_stale_vote_count (and the comment above it);
+#                  scenario_slow_wire (400 ms delays > election timeout) via
+#                  invariant 1 (two leaders in a term)
 # provenance: reconstructed (README round 2 "dropping the term guard on vote
 #             counting", survivor at 3,950 universes)'
 
@@ -115,8 +116,8 @@ emit raft-04-election-quorum-half-is-majority src/raft.hpp \
 # breaks: maybe_win() accepts exactly half the votes, so on an even cluster two
 #         candidates with 2/4 each are both elected in the same term
 # expected killer: test_raft unit_elect_quorum (n=2 self-vote, n=4 split brain);
-#                  scenario even_split (n=4 partitioned 2-2, test_raft.cpp:680-)
-#                  via "half a cluster elected a new leader without quorum"
+#                  scenario_even_split (n=4 partitioned 2-2) via "half a
+#                  cluster elected a new leader without quorum"
 # provenance: reconstructed (README round 2 "every seeded cluster size was odd,
 #             where > and >= majorities coincide, which hid an election-quorum
 #             off-by-one")'
@@ -141,10 +142,10 @@ emit raft-06-no-vote-reset-on-term-bump src/raft.hpp \
 #       convert to follower -- which resets votedFor for the new term
 # breaks: become_follower() bumps the term but keeps the old votedFor, so a
 #         node that voted for A in term 5 cannot vote in term 6 unless A asks
-#         again -- and (the mirror hazard the comment at raft.hpp:139-142
+#         again -- and (the mirror hazard the comment in become_follower()
 #         names) a stale votedFor across a bump is how double votes happen
 # expected killer: test_raft unit_double_vote ("term bump resets the vote")
-# provenance: candidate (rule is called out at raft.hpp:139-142 as a classic
+# provenance: candidate (rule is called out in become_follower() as a classic
 #             mutant-class bug; not named as one of the twelve)'
 
 emit raft-07-uptodate-index-tiebreak-dropped src/raft.hpp \
@@ -156,9 +157,10 @@ emit raft-07-uptodate-index-tiebreak-dropped src/raft.hpp \
 #         same last term grants to a candidate with a shorter log, which can
 #         elect a leader missing committed entries
 # expected killer: test_raft unit_uptodate_index ("same last term, shorter log
-#                  must be denied", test_raft.cpp:401-403); the comment records
-#                  that one lossy seed in 450 was the only thing catching it
-# provenance: reconstructed (test_raft.cpp:401-403)'
+#                  must be denied"); the comment above unit_uptodate_index
+#                  records that one lossy seed in 450 was the only thing
+#                  catching it
+# provenance: reconstructed (the comment above unit_uptodate_index)'
 
 emit raft-08-uptodate-term-half-dropped src/raft.hpp \
 's/\Q        bool up_to_date =
@@ -174,10 +176,9 @@ emit raft-08-uptodate-term-half-dropped src/raft.hpp \
 #                  election there needs F to grant on last TERM, since F'"'"'s
 #                  log is longer) and test_exchange scenario_replicated_book
 #                  (seed 14, n=3) via the ledger invariant.
-#                  NOTE: as the suite stood before unit_stale_ae_reply, test_raft
-#                  did NOT kill this one: the old comment at unit_uptodate_index
-#                  said the term half is pinned by figure8, but unit_figure8 and
-#                  all 4,550 seeded universes passed with this mutant applied.
+#                  unit_figure8 and the seeded test_raft universes pass with
+#                  this mutant applied; the scripted term-4 election is the
+#                  test_raft kill.
 # provenance: candidate (see mutants/README.md, "what the table taught")'
 
 emit raft-09-vote-grant-does-not-reset-timer src/raft.hpp \
@@ -219,11 +220,11 @@ emit raft-11-follower-commit-unclamped src/raft.hpp \
 # breaks: the follower takes leaderCommit verbatim, so a leader that pages its
 #         suffix (or any leader_commit beyond the carried entries) pushes the
 #         follower'"'"'s commit index past the end of its log
-# expected killer: test_raft unit_commit_clamp (test_raft.cpp:352-356, which
-#                  records that inside the closed system the clamp is dead code
+# expected killer: test_raft unit_commit_clamp (the comment above it records
+#                  that inside the closed system the clamp is dead code
 #                  because this leader ships the full suffix: the seeded
 #                  universes cannot kill this one, the scripted test must)
-# provenance: reconstructed (test_raft.cpp:352-356)'
+# provenance: reconstructed (the comment above unit_commit_clamp)'
 
 emit raft-12-stale-ae-reply-term-guard-dropped src/raft.hpp \
 's/\Q        if (role_ != Role::Leader || r.term != p_.current_term) return;\E/        if (role_ != Role::Leader) return;/' \
@@ -257,10 +258,10 @@ emit exch-01-sell-at-best-bid-does-not-trade src/exchange.hpp \
 # rule: a sell limit at price p crosses every resting bid with price >= p
 # breaks: strict inequality on the sell side, so a sell AT the best bid rests
 #         instead of trading and the book is crossed (bid == ask both resting)
-# expected killer: test_exchange unit_sell_at_bid (test_exchange.cpp:62-64);
+# expected killer: test_exchange unit_sell_at_bid (and the comment above it);
 #                  the chaos layer'"'"'s uncrossed-book invariant in every universe
 # provenance: reconstructed (README "the one-character sell-side mirror of a
-#             fully-pinned buy-side rule"; test_exchange.cpp:62-64)'
+#             fully-pinned buy-side rule"; the comment above unit_sell_at_bid)'
 
 emit exch-02-buy-at-best-ask-does-not-trade src/exchange.hpp \
 's/\Q            while (qty > 0 && !asks_.empty() && asks_.begin()->first <= px)\E/            while (qty > 0 \&\& !asks_.empty() \&\& asks_.begin()->first < px)/' \
@@ -281,7 +282,7 @@ emit exch-03-volume-halved src/exchange.hpp \
 # breaks: every fill adds half its quantity -- deterministically, on every
 #         replica, so cross-replica equality cannot see it
 # expected killer: test_exchange unit_accounting ("volume equals traded
-#                  quantity", test_exchange.cpp:105-107)
+#                  quantity"; see the comment above unit_accounting)
 # provenance: reconstructed (README/test comment: "every replica halves the
 #             volume identically. Only absolute assertions kill that class")'
 
@@ -293,8 +294,8 @@ emit exch-04-fill-price-left-out-of-hash src/exchange.hpp \
 #       just the resting book and counters
 # breaks: note_fill() stops folding the fill price, so two replicas with the
 #         same book and counts but fills at different prices hash equal
-# expected killer: test_exchange unit_hash_covers_fills (test_exchange.cpp:120-122)
-# provenance: reconstructed (test_exchange.cpp:120-122)'
+# expected killer: test_exchange unit_hash_covers_fills (and the comment above it)
+# provenance: reconstructed (the comment above unit_hash_covers_fills)'
 
 emit exch-05-rejections-not-counted src/exchange.hpp \
 's/\Q    void note_reject() { ++rejected_; }\E/    void note_reject() {}/' \

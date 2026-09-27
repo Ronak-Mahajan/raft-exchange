@@ -501,11 +501,10 @@ static void unit_depose_deadline_reset() {
 
 // Section 5.4.1's INDEX tiebreak: same last term, shorter log -> no vote.
 // (This pins the index half, which one lossy seed in 450 was the only
-// thing catching. The TERM half is NOT pinned by figure8, despite what an
-// earlier comment here said: the mutation gate (mutants/raft-08) showed
-// that dropping it survived every seeded raft universe and unit_figure8;
-// it is pinned by unit_stale_ae_reply's term-4 election and by the
-// exchange chaos layer.)
+// thing catching.) The TERM half, where a longer log of older terms loses
+// to a shorter log of a newer term, is pinned by unit_stale_ae_reply's
+// term-4 election and by the exchange chaos layer; unit_figure8 and the
+// seeded raft universes do not reach it (mutants/raft-08).
 static void unit_uptodate_index() {
     raft::Node f(1, 3);
     raft::Persistent p;
