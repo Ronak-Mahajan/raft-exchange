@@ -40,11 +40,15 @@
 # every "kill" would be meaningless, so the run aborts.
 #
 # Exit status is non-zero if any mutant survived, failed to apply, or
-# failed to build. A crash-only kill does not fail the gate, but it is
-# called out under the table. Mutants run in parallel ($JOBS, default
-# nproc); the table is printed sorted, so output is deterministic.
+# failed to build. With MUTANT_STRICT=1 (CI sets it) it is also non-zero
+# unless every mutant died as killed/assert: assert+crash, crash-only,
+# timeout and unexplained exit-1 kills then fail the run and are named.
+# Without it they are called out under the table but do not fail the run.
+# Mutants run in parallel ($JOBS, default nproc); the table is printed
+# sorted, so output is deterministic.
 #
 # Usage:  bash mutants/run.sh            (from anywhere)
+#         MUTANT_STRICT=1 bash mutants/run.sh
 #         CXX=clang++ JOBS=2 bash mutants/run.sh
 #         bash mutants/run.sh mutants/raft-01-figure8-commit-by-count.patch
 set -u
@@ -271,7 +275,20 @@ for p in "${patches[@]}"; do
     esac
 done
 
+fail=0
 if [ "$survived" -gt 0 ] || [ "$apply_failed" -gt 0 ] || [ "$build_failed" -gt 0 ]; then
-    exit 1
+    fail=1
 fi
-exit 0
+if [ "${MUTANT_STRICT:-0}" = 1 ] && [ "$by_assert" -ne "$total" ]; then
+    echo
+    echo "strict: $((total - by_assert)) of $total mutants did not die as killed/assert:"
+    for p in "${patches[@]}"; do
+        name="$(basename "$p" .patch)"
+        res="$WORK/$name/result"
+        if [ ! -f "$res" ]; then echo "  $name NO-RESULT"; continue; fi
+        IFS=$'\t' read -r n status killers detail < "$res"
+        [ "$status" = "killed/assert" ] || echo "  $n $status"
+    done
+    fail=1
+fi
+exit "$fail"

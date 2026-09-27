@@ -6,11 +6,13 @@ re-introduces a bug the suite claims to catch, so that a rule the suite
 does not actually pin shows up as a survivor. `run.sh` applies each patch
 to a scratch copy, builds both suites, runs them, and prints a table. CI
 runs it on every push (the `mutants` job in `.github/workflows/ci.yml`)
-and fails the build on a survivor, an unappliable patch, or a mutant that
-does not compile.
+with `MUTANT_STRICT=1`, and fails the build on a survivor, an unappliable
+patch, a mutant that does not compile, or any kill other than
+`killed/assert`.
 
 ```
 bash mutants/run.sh                       # whole table
+MUTANT_STRICT=1 bash mutants/run.sh       # what CI runs
 bash mutants/run.sh mutants/raft-01-*.patch   # one mutant
 CXX=clang++ JOBS=4 MUTANT_TIMEOUT=300 bash mutants/run.sh
 ```
@@ -20,7 +22,10 @@ exact literal substitution, and the script diffs it against the current
 `src/` to write the `.patch`. After any refactor of `src/` that makes
 `run.sh` report `APPLY-FAILED`, edit the substitution and run
 `bash mutants/regen.sh`. A substitution that matches nothing is an error,
-so a mutant cannot silently stop mutating.
+so a mutant cannot silently stop mutating. Before the table runs, CI
+deletes every patch, runs `regen.sh`, and fails if `git status` then
+shows any change under `mutants/`, so a hand-edited, stale, orphaned or
+uncommitted patch cannot reach the gate.
 
 ## Where each patch comes from
 
@@ -59,12 +64,14 @@ to state. The runner separates the two:
 |---|---|
 | `killed/assert` | a `FAIL` line and exit 1. The named assertion is the kill. |
 | `killed/assert+crash` | a `FAIL` line *and* an abnormal exit. The assertion is the kill; the crash is reported beside it, because a crash during a mutant run usually points at a scenario the mutant steered into an unguarded state. |
-| `killed/crash` | abnormal exit, no `FAIL` line anywhere. Detected only by falling over. Does not fail the gate, but is called out under the table for investigation. |
+| `killed/crash` | abnormal exit, no `FAIL` line anywhere. Detected only by falling over, and called out under the table for investigation. |
 | `killed/timeout` | ran past `$MUTANT_TIMEOUT`. Detected by not terminating. |
 | `killed/nonzero` | exit 1 with no `FAIL` line: failed without saying why. |
 | `SURVIVED` / `APPLY-FAILED` / `BUILD-FAILED` | as before; each fails the gate. |
 
-All 24 mutants die in the strongest category, `killed/assert`.
+Under `MUTANT_STRICT=1`, which CI sets, every status other than
+`killed/assert` fails the gate and is listed by name. All 24 mutants die
+in that strongest category.
 
 ```
 mutant                                         status               killed by                first failing line

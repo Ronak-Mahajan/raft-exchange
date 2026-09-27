@@ -77,19 +77,38 @@ jobs:
           retention-days: 14
 
   mutants:
-    # Mutation gate: every patch in mutants/ must apply, build, and be killed
-    # by at least one suite. A survivor, an unappliable patch, or a mutant
-    # that does not compile fails the build. See mutants/README.md.
+    # Mutation gate. The committed patches must be exactly what
+    # mutants/regen.sh generates from the current src/ (a stale, orphaned
+    # or missing patch fails), and every patch must apply, build, and die
+    # as killed/assert: a named FAIL line and exit 1. A survivor, a
+    # stillborn mutant, or a kill by crash, timeout or unexplained exit
+    # fails the build (MUTANT_STRICT=1). See mutants/README.md.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+      - name: patches match mutants/regen.sh
+        shell: bash
+        run: |
+          {
+            rm -f mutants/*.patch
+            bash mutants/regen.sh
+            drift="$(git status --porcelain -- mutants/)"
+            if [ -n "$drift" ]; then
+              echo "mutants/*.patch differ from what mutants/regen.sh generates:"
+              echo "$drift"
+              git diff -- mutants/
+              exit 1
+            fi
+            echo "every committed patch matches mutants/regen.sh"
+          } 2>&1 | tee -a ci.log; exit ${PIPESTATUS[0]}
       - name: run the mutant table
         shell: bash
         env:
           CXX: g++-13
+          MUTANT_STRICT: "1"
           MUTANT_TIMEOUT: "300"   # per suite per mutant; timeout-minutes caps the whole job
         run: |
           bash mutants/run.sh 2>&1 | tee -a ci.log; exit ${PIPESTATUS[0]}
