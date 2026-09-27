@@ -185,10 +185,13 @@ private:
               std::int64_t& qty, Book& book) {
         auto lvl = book.begin();             // best price, FIFO within it
         auto& q = lvl->second;
-        Order& maker = q.front();
+        // Checked: a price level left empty is a std::out_of_range here,
+        // which the tests report by name, not undefined behaviour.
+        Order& maker = q.at(0);
         std::int64_t traded = qty < maker.qty ? qty : maker.qty;
-        fills.push_back({taker, maker.id, lvl->first, traded});
-        note_fill(fills.back());
+        Fill fill{taker, maker.id, lvl->first, traded};
+        fills.push_back(fill);
+        note_fill(fill);
         qty -= traded;
         maker.qty -= traded;
         if (maker.qty == 0) {

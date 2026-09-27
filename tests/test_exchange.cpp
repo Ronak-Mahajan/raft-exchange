@@ -178,6 +178,8 @@ static void unit_deterministic_rejection() {
         "N 6 B 100 5extra",       // trailing bytes
         "N 7 B 100 5 ",           // trailing space
         "N 8  B 100 5",           // double space: non-canonical
+        "N  B 100 5",             // empty id field
+        "N 12 B,100 5",           // separator other than one space
         "N 9 B 1000000001 5",     // price above the admission bound
         "N 10 B 100 5\n",         // newline is not part of the grammar
         "C 1 junk",               // trailing bytes on cancel
@@ -188,6 +190,17 @@ static void unit_deterministic_rejection() {
           "rejected commands change no book state");
     CHECK(x.rejected() == sizeof(bad) / sizeof(bad[0]),
           "every rejection is counted");
+}
+
+// A field is a digit string, and "0" is one: 0 is an ordinary order id.
+static void unit_zero_id() {
+    exch::Exchange x;
+    x.apply("N 0 S 100 5");
+    CHECK(x.rejected() == 0 && x.open_orders() == 1 && x.best_ask() == 100,
+          "order id 0 is accepted");
+    x.apply("C 0");
+    CHECK(x.rejected() == 0 && x.open_orders() == 0 && x.best_ask() == 0,
+          "order id 0 can be cancelled");
 }
 
 // A fixed script with a compiled-in expected hash: any build (compiler,
@@ -353,6 +366,7 @@ int main() {
     UNIT(unit_accounting);
     UNIT(unit_hash_covers_fills);
     UNIT(unit_deterministic_rejection);
+    UNIT(unit_zero_id);
     UNIT(unit_golden_vector);
     UNIT(unit_replay_determinism);
     std::printf("%-14s price-time both sides, FIFO, cancel+reuse, "

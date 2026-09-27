@@ -306,6 +306,8 @@ static void unit_apply_and_replay() {
     // applied stream must be x, y, z -- the prefix replayed identically.
     auto s = ns[0].stable();
     ns[0].restart(s, now, 10);
+    CHECK(ns[0].role() == raft::Role::Follower && ns[0].commit_index() == 0,
+          "a restarted leader comes back as a follower with nothing committed");
     now += 10; out.clear(); ns[0].tick(now, out);
     replies.clear(); deliver(ns, out, {1}, now, replies);
     out.clear();     deliver(ns, replies, {0}, now, out);
@@ -338,6 +340,8 @@ static void unit_double_vote() {
     CHECK(!rv(5, 2), "second candidate in the same term denied");
     CHECK(rv(6, 2), "term bump resets the vote; term-6 candidate granted");
     CHECK(!rv(5, 0), "stale-term request denied");
+    CHECK(!f.propose("x").has_value() && f.log().empty(),
+          "a follower must refuse a client proposal");
 }
 
 // The n = 1 degenerate cluster is its own majority.
@@ -361,6 +365,8 @@ static void unit_elect_quorum() {
     a.tick(10, out);   // starts election: own vote is 1 of 2
     CHECK(a.role() == raft::Role::Candidate,
           "n=2: a candidate's own vote alone must not elect it");
+    CHECK(out.size() == 1 && out[0].rv && out[0].to == 1,
+          "a candidate sends one RequestVote to each peer and none to itself");
 
     // 4-node split brain: two candidates, each with exactly half the votes.
     raft::Node c1(0, 4), c2(3, 4);
