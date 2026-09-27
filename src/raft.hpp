@@ -117,6 +117,9 @@ public:
     Index commit_index() const { return commit_; }
     const std::vector<Entry>& log() const { return p_.log; }
     NodeId id() const { return id_; }
+    // matchIndex per peer: meaningful while role() is Leader, and read by
+    // the simulator's Leader Matching invariant.
+    const std::vector<Index>& match_index() const { return match_; }
     // Entries the state machine may apply (prefix up to commit_).
     std::vector<Entry> take_applicable() {
         std::vector<Entry> out;

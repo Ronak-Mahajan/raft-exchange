@@ -33,6 +33,37 @@
 
 namespace sim {
 
+// Leader Matching. A leader that records matchIndex[p] = k counts p as a
+// replica of its entry at k when it advances the commit index, so p's log
+// must hold that entry: same index, same term (by Log Matching, the whole
+// prefix then agrees). Only a leader whose term no node has passed is
+// held to it: once a newer term exists, a newer leader may legitimately
+// have rewritten p's log. Returns the first violation, or "" if none.
+// `ns[i]` must be node i; crashed nodes keep their logs and count.
+inline std::string leader_matching_violation(
+        const std::vector<raft::Node>& ns) {
+    raft::Term newest = 0;
+    for (const auto& nd : ns) newest = std::max(newest, nd.term());
+    for (const auto& ld : ns) {
+        if (ld.role() != raft::Role::Leader || ld.term() < newest) continue;
+        const auto& mine = ld.log();
+        for (std::size_t p = 0; p < ns.size(); ++p) {
+            if (static_cast<int>(p) == ld.id()) continue;
+            raft::Index k = ld.match_index().at(p);
+            if (k == 0) continue;
+            const auto& theirs = ns[p].log();
+            if (k > theirs.size() || k > mine.size() ||
+                theirs[static_cast<size_t>(k - 1)].term !=
+                    mine[static_cast<size_t>(k - 1)].term)
+                return "leader " + std::to_string(ld.id()) + " (term " +
+                       std::to_string(ld.term()) + ") has matchIndex " +
+                       std::to_string(k) + " for node " + std::to_string(p) +
+                       ", whose log does not hold that entry";
+        }
+    }
+    return "";
+}
+
 struct Config {
     int n_nodes = 5;
     std::uint64_t min_delay_ms = 1, max_delay_ms = 15;
@@ -366,6 +397,16 @@ private:
                             std::to_string(i + 1);
                 return false;
             }
+        }
+        // 5. Leader Matching: every matchIndex the newest-term leader
+        // counts toward commitment names an entry the peer really holds.
+        // The ledger sees a stale matchIndex only after it has produced
+        // a wrong commit and a later overwrite; this sees it as soon as
+        // the peer's log and the leader's bookkeeping disagree.
+        std::string stale = leader_matching_violation(nodes_);
+        if (!stale.empty()) {
+            violation = stale;
+            return false;
         }
         return true;
     }

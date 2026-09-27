@@ -48,8 +48,9 @@ generate. Only then does it earn a matching engine on top.
   replays included.
 
 ```
-scripted       figure8, stale-AE, stale-AE-reply, apply+replay, votes x3, quorums x3,
-               timers x2, clamp: pass
+scripted       figure8, re-elected leader, stale-AE, stale-AE-reply, append,
+               apply+replay, votes x3, quorums x3, timers x3, stepdown x2,
+               next index, clamp: pass
 basic          n=3/5/7 x 150 seeds, all invariants held
 partition      n=3/5/7 x 150 seeds, all invariants held
 crash_restart  n=3/5/7 x 150 seeds, all invariants held

@@ -6,9 +6,10 @@
 //    survived 8,000 random universes before these tests existed.
 // 2. Seeded universes: every scenario across three cluster sizes and
 //    hundreds of seeds, with safety invariants (election safety, the
-//    committed-entry ledger, state-machine equivalence) checked after every
-//    simulation tick (5 virtual ms) inside every run. A failure prints the
-//    seed and cluster size, which reproduce it exactly.
+//    committed-entry ledger, state-machine equivalence, leader matching)
+//    checked after every simulation tick (5 virtual ms) inside every run.
+//    A failure prints the seed and cluster size, which reproduce it
+//    exactly.
 // 3. Liveness bounds: elections and commits must not merely happen, they
 //    must happen within a deadline, measured in virtual milliseconds.
 #include <cstdio>
@@ -99,6 +100,36 @@ static void deliver(std::vector<raft::Node>& ns, const MsgVec& in,
             ns[static_cast<size_t>(m.to)].receive(m, now, out);
 }
 
+// Ledger oracle for the scripted tests, the rule of sim.hpp's invariant 3:
+// the moment any node's commit index covers index i, the entry at i is
+// frozen forever, and every later state must honour it.
+struct ScriptLedger {
+    std::map<raft::Index, std::pair<raft::Term, std::string>> frozen;
+    void check(const std::vector<raft::Node>& ns, const char* where) {
+        for (const auto& nd : ns) {
+            if (nd.commit_index() > nd.log().size()) {
+                std::printf("FAIL: commit index beyond the log on node %d "
+                            "(%s)\n", nd.id(), where);
+                failed();
+                return;
+            }
+            for (raft::Index i = 1; i <= nd.commit_index(); ++i) {
+                const auto& e = nd.log()[static_cast<size_t>(i - 1)];
+                auto it = frozen.find(i);
+                if (it == frozen.end()) {
+                    frozen[i] = {e.term, e.cmd};
+                } else if (it->second != std::make_pair(e.term, e.cmd)) {
+                    std::printf("FAIL: committed entry overwritten at idx "
+                                "%llu (%s)\n",
+                                (unsigned long long)i, where);
+                    failed();
+                    return;
+                }
+            }
+        }
+    }
+};
+
 // The paper's figure 8: a leader must never commit an OLDER-term entry by
 // replica count alone (section 5.4.2). Ledger oracle: the moment any node's
 // commit index covers index i, the entry at i is frozen forever.
@@ -110,25 +141,8 @@ static void unit_figure8() {
     for (int i = 0; i < n; ++i)
         ns[i].restart(raft::Persistent{}, now, i == 0 ? 10 : 1000000);
 
-    std::map<raft::Index, std::pair<raft::Term, std::string>> ledger;
-    auto ledger_check = [&](const char* where) {
-        for (auto& nd : ns) {
-            for (raft::Index i = 1; i <= nd.commit_index(); ++i) {
-                auto& e = nd.log()[static_cast<size_t>(i - 1)];
-                auto it = ledger.find(i);
-                if (it == ledger.end()) {
-                    ledger[i] = {e.term, e.cmd};
-                } else if (it->second !=
-                           std::make_pair(e.term, e.cmd)) {
-                    std::printf("FAIL: committed entry overwritten at idx "
-                                "%llu (%s)\n",
-                                (unsigned long long)i, where);
-                    failed();
-                    return;
-                }
-            }
-        }
-    };
+    ScriptLedger ledger;
+    auto ledger_check = [&](const char* where) { ledger.check(ns, where); };
 
     MsgVec out, replies;
     // Step 1: node0 wins term 1 with votes {0,1,2}; appends "A" (idx 1),
@@ -225,6 +239,41 @@ static void unit_stale_ae_retransmission() {
           "stale retransmission must not truncate the log");
     CHECK(f.commit_index() <= f.log().size(),
           "commit index must never exceed log length");
+}
+
+// Figure 2 AppendEntries receiver, steps 2 and 4, with a non-zero
+// prevLogIndex: the consistency check compares the term stored at
+// prevLogIndex, and on success each new entry after it is appended.
+// (Most scripted shipments start at prevLogIndex 0, where the stored
+// term is the constant 0.)
+static void unit_append_after_prev() {
+    raft::Node f(1, 3);
+    raft::Persistent p;
+    p.current_term = 1;
+    p.log = {{1, "a"}};
+    f.restart(p, 0, 1000000);
+    auto ship = [&](raft::Index prev, raft::Term prev_term,
+                    std::vector<raft::Entry> entries) {
+        Message m; m.from = 0; m.to = 1;
+        raft::AppendEntries ae;
+        ae.term = 1; ae.leader = 0;
+        ae.prev_log_index = prev; ae.prev_log_term = prev_term;
+        ae.entries = std::move(entries);
+        m.ae = ae;
+        MsgVec out;
+        f.receive(m, 10, out);
+        return out.at(0).aer.value();
+    };
+    auto r = ship(1, 1, {{1, "b"}});
+    CHECK(r.success,
+          "AppendEntries whose previous entry matches must be accepted");
+    CHECK(f.log().size() == 2 && f.log().back().cmd == "b" &&
+              r.match_hint == 2,
+          "the entry after a matching previous entry must be appended");
+    CHECK(!ship(2, 7, {{1, "c"}}).success && f.log().size() == 2,
+          "AppendEntries whose previous term differs must be refused");
+    CHECK(!ship(5, 1, {}).success && f.log().size() == 2,
+          "AppendEntries past the end of the log must be refused");
 }
 
 // Committed entries must reach the state machine, in order, exactly once
@@ -367,6 +416,36 @@ static void unit_candidate_stepdown() {
           "rival candidate did not step down on equal-term AppendEntries");
 }
 
+// Figure 2, all servers: a reply that carries a higher term makes the
+// receiver adopt that term and step down, whether it is a candidate
+// counting votes or a leader counting acknowledgements.
+static void unit_stepdown_on_higher_term_reply() {
+    MsgVec out;
+    raft::Node c(0, 3);
+    c.restart(raft::Persistent{}, 0, 100);
+    c.tick(100, out);                              // candidate, term 1
+    Message v; v.from = 1; v.to = 0;
+    v.rvr = raft::RequestVoteReply{5, false};
+    out.clear(); c.receive(v, 101, out);
+    CHECK(c.role() == raft::Role::Follower && c.term() == 5,
+          "a candidate must adopt the higher term of a RequestVote reply "
+          "and step down");
+
+    raft::Node l(0, 3);
+    l.restart(raft::Persistent{}, 0, 100);
+    out.clear(); l.tick(100, out);
+    Message g; g.from = 1; g.to = 0;
+    g.rvr = raft::RequestVoteReply{1, true};
+    out.clear(); l.receive(g, 101, out);           // leader, term 1
+    CHECK(l.role() == raft::Role::Leader, "leader elected for the reply");
+    Message a; a.from = 2; a.to = 0;
+    a.aer = raft::AppendEntriesReply{7, false, 0};
+    out.clear(); l.receive(a, 102, out);
+    CHECK(l.role() == raft::Role::Follower && l.term() == 7,
+          "a leader must adopt the higher term of an AppendEntries reply "
+          "and step down");
+}
+
 // Granted replies from a PREVIOUS term's election must not count toward
 // the current tally: replies delayed past the election timeout otherwise
 // elect a leader with no current-term majority. (Found by a novel-mutant
@@ -409,25 +488,8 @@ static void unit_stale_ae_reply() {
     for (int i = 0; i < n; ++i)
         ns[i].restart(raft::Persistent{}, now, i == 0 ? 10 : 1000000);
 
-    std::map<raft::Index, std::pair<raft::Term, std::string>> ledger;
-    auto ledger_check = [&](const char* where) {
-        for (auto& nd : ns) {
-            for (raft::Index i = 1; i <= nd.commit_index(); ++i) {
-                auto& e = nd.log()[static_cast<size_t>(i - 1)];
-                auto it = ledger.find(i);
-                if (it == ledger.end()) {
-                    ledger[i] = {e.term, e.cmd};
-                } else if (it->second !=
-                           std::make_pair(e.term, e.cmd)) {
-                    std::printf("FAIL: committed entry overwritten at idx "
-                                "%llu (%s)\n",
-                                (unsigned long long)i, where);
-                    failed();
-                    return;
-                }
-            }
-        }
-    };
+    ScriptLedger ledger;
+    auto ledger_check = [&](const char* where) { ledger.check(ns, where); };
 
     MsgVec out, replies, stale;
     // Term 1: L leads with everyone's vote, appends a,b,c and ships them
@@ -494,6 +556,97 @@ static void unit_stale_ae_reply() {
     ledger_check("after M overwrote index 3");
 }
 
+// Figure 2, leader state "reinitialized after election": nextIndex and
+// matchIndex belong to the term that set them. L leads term 1 and learns
+// from F's reply that F holds a,b,c. M's term-2 AppendEntries deposes L
+// (no crash, no restart) and truncates L's log, and L's own timer then
+// re-elects it in term 3. A leader that carried matchIndex[F] = 3 into
+// term 3 would count F as a replica of its new entry x at index 3, commit
+// x while only L and D hold it, and M would overwrite that committed
+// entry in term 4. unit_stale_ae_reply reaches the same index from the
+// reply side, but there L restarts, and restart() clears matchIndex.
+static void unit_reelected_leader_stale_match() {
+    const int n = 5;                        // L=0, F=1, M=2, D=3, E=4
+    std::vector<raft::Node> ns;
+    for (int i = 0; i < n; ++i) ns.emplace_back(i, n);
+    std::uint64_t now = 0;
+    for (int i = 0; i < n; ++i)
+        ns[i].restart(raft::Persistent{}, now, i == 0 ? 10 : 1000000);
+    ScriptLedger ledger;
+    MsgVec out, replies;
+
+    // Term 1: L leads with everyone's vote and ships a,b,c to F only. F's
+    // success reply is delivered: L records matchIndex[F] = 3.
+    now = 10; ns[0].tick(now, out);
+    replies.clear(); deliver(ns, out, {1, 2, 3, 4}, now, replies);
+    out.clear();     deliver(ns, replies, {0}, now, out);
+    CHECK(ns[0].role() == raft::Role::Leader, "L leads term 1");
+    ns[0].propose("a"); ns[0].propose("b"); ns[0].propose("c");
+    now = 50; out.clear(); ns[0].tick(now, out);
+    replies.clear(); deliver(ns, out, {1}, now, replies);
+    out.clear();     deliver(ns, replies, {0}, now, out);
+    CHECK(ns[0].match_index().at(1) == 3 && ns[0].commit_index() == 0,
+          "L knows F holds a,b,c, and 2 of 5 commits nothing");
+
+    // Term 2: M (empty log) leads with votes from D and E and ships m1,m2
+    // to L and D. The higher term deposes L, and a,b,c are truncated.
+    ns[2].restart(ns[2].stable(), now, 10);
+    now = 60; out.clear(); ns[2].tick(now, out);
+    replies.clear(); deliver(ns, out, {3, 4}, now, replies);
+    out.clear();     deliver(ns, replies, {2}, now, out);
+    CHECK(ns[2].role() == raft::Role::Leader && ns[2].term() == 2,
+          "M leads term 2");
+    ns[2].propose("m1"); ns[2].propose("m2");
+    now = 85; out.clear(); ns[2].tick(now, out);
+    replies.clear(); deliver(ns, out, {0, 3}, now, replies);
+    CHECK(ns[0].role() == raft::Role::Follower && ns[0].term() == 2 &&
+              ns[0].log().size() == 2 && ns[0].log()[0].cmd == "m1",
+          "M's AppendEntries deposes L and truncates a,b,c");
+
+    // Term 3: L's own election timer fires and D and E elect it.
+    now = 95; out.clear(); ns[0].tick(now, out);
+    replies.clear(); deliver(ns, out, {3, 4}, now, replies);
+    out.clear();     deliver(ns, replies, {0}, now, out);
+    CHECK(ns[0].role() == raft::Role::Leader && ns[0].term() == 3,
+          "L is re-elected in term 3 without a restart");
+    bool probes_at_last = !out.empty();
+    for (const auto& m : out)
+        if (!m.ae || m.ae->prev_log_index != ns[0].log().size() ||
+            !m.ae->entries.empty())
+            probes_at_last = false;
+    CHECK(probes_at_last,
+          "a re-elected leader must probe every peer at its last log index");
+    CHECK(sim::leader_matching_violation(ns).empty(),
+          "a re-elected leader must not keep matchIndex from an earlier term");
+    replies.clear(); deliver(ns, out, {2}, now, replies);  // M learns term 3
+
+    // L appends x at index 3, the index its term-1 matchIndex names for
+    // F, and ships it to D only: x is on 2 of 5 replicas.
+    ns[0].propose("x");
+    now = 120; out.clear(); ns[0].tick(now, out);
+    replies.clear(); deliver(ns, out, {3}, now, replies);
+    out.clear();     deliver(ns, replies, {0}, now, out);
+    CHECK(ns[0].commit_index() == 0,
+          "x on 2 of 5 replicas must be uncommitted");
+    ledger.check(ns, "after x reached D");
+
+    // Term 4: M, F and E elect M (last term 2 beats F's longer term-1
+    // log), and M's next entry overwrites index 3 on L. The ledger fires
+    // here if x was committed.
+    ns[2].restart(ns[2].stable(), now, 10);
+    now = 130; out.clear(); ns[2].tick(now, out);
+    replies.clear(); deliver(ns, out, {1, 4}, now, replies);
+    out.clear();     deliver(ns, replies, {2}, now, out);
+    CHECK(ns[2].role() == raft::Role::Leader && ns[2].term() == 4,
+          "M leads term 4 over the re-elected leader");
+    ns[2].propose("y");
+    now = 155; out.clear(); ns[2].tick(now, out);
+    replies.clear(); deliver(ns, out, {0}, now, replies);
+    CHECK(ns[0].log().size() == 3 && ns[0].log()[2].cmd == "y",
+          "M's entry replaces x on L");
+    ledger.check(ns, "after M overwrote x at index 3");
+}
+
 // Figure 2 AE receiver rule 5 is min(leaderCommit, index of last new
 // entry). This leader always ships the full suffix, so the clamp is dead
 // code inside the closed system -- but Node::receive is public API, and a
@@ -541,6 +694,91 @@ static void unit_depose_deadline_reset() {
     a.tick(5001, out);   // must stay quiet until ~5100
     CHECK(a.role() == raft::Role::Follower && a.term() == 2 && out.empty(),
           "deposed leader campaigned instantly instead of waiting a timeout");
+}
+
+// A leader sends one AppendEntries round per heartbeat interval, not one
+// per tick: after the round that announces its election, the next round
+// is due kHeartbeatMs later.
+static void unit_heartbeat_cadence() {
+    const std::uint64_t hb = raft::Node::kHeartbeatMs;
+    raft::Node l(0, 3);
+    l.restart(raft::Persistent{}, 0, 100);
+    MsgVec out;
+    l.tick(100, out);                              // candidate, term 1
+    Message g; g.from = 1; g.to = 0;
+    g.rvr = raft::RequestVoteReply{1, true};
+    out.clear(); l.receive(g, 100, out);           // leader: first round
+    CHECK(l.role() == raft::Role::Leader && out.size() == 2,
+          "a new leader announces itself to both peers");
+    bool quiet = true;
+    for (std::uint64_t t = 105; t < 100 + hb; t += 5) {
+        out.clear(); l.tick(t, out);
+        if (!out.empty()) quiet = false;
+    }
+    CHECK(quiet, "a leader must not send a second AppendEntries round "
+                 "inside one heartbeat interval");
+    out.clear(); l.tick(100 + hb, out);
+    CHECK(out.size() == 2, "the next round is due one heartbeat interval "
+                           "after the last");
+}
+
+// nextIndex bookkeeping (figure 2 leader rules, section 5.3), observed in
+// the AppendEntries the leader sends next: a new leader starts every peer
+// at its last index + 1; an acknowledgement moves the peer past what it
+// now holds; a refusal backs off by one entry, but never below the match
+// the peer has already confirmed.
+static void unit_next_index() {
+    raft::Persistent held;
+    held.current_term = 1;
+    held.log = {{1, "a"}, {1, "b"}};
+    std::vector<raft::Node> ns;
+    for (int i = 0; i < 3; ++i) ns.emplace_back(i, 3);
+    ns[0].restart(held, 0, 100);                   // A: the leader-to-be
+    ns[1].restart(held, 0, 1000000);               // B holds a,b
+    ns[2].restart(raft::Persistent{}, 0, 1000000); // C holds nothing
+    MsgVec out, replies;
+    auto sent_to = [&](int peer) -> const raft::AppendEntries* {
+        for (const auto& m : out)
+            if (m.to == peer && m.ae) return &*m.ae;
+        return nullptr;
+    };
+
+    ns[0].tick(100, out);                          // candidate, term 2
+    replies.clear(); deliver(ns, out, {1}, 100, replies);
+    out.clear();     deliver(ns, replies, {0}, 100, out);
+    CHECK(ns[0].role() == raft::Role::Leader && ns[0].term() == 2,
+          "A leads term 2 with B's vote");
+    const raft::AppendEntries* b = sent_to(1);
+    const raft::AppendEntries* c = sent_to(2);
+    CHECK(b && c && b->prev_log_index == 2 && b->entries.empty() &&
+              c->prev_log_index == 2 && c->entries.empty(),
+          "a new leader must probe every peer at its last log index");
+
+    // B accepts the probe; C, whose log is empty, refuses it.
+    ns[0].propose("c");                            // index 3
+    replies.clear(); deliver(ns, out, {1, 2}, 100, replies);
+    out.clear();     deliver(ns, replies, {0}, 100, out);
+    out.clear(); ns[0].tick(125, out);
+    c = sent_to(2);
+    CHECK(c && c->prev_log_index == 1 && c->entries.size() == 2,
+          "a refusal must back nextIndex off by one entry");
+
+    // B acknowledges c: its next AppendEntries carries nothing it holds.
+    replies.clear(); deliver(ns, out, {1}, 125, replies);
+    out.clear();     deliver(ns, replies, {0}, 125, out);
+    out.clear(); ns[0].tick(150, out);
+    b = sent_to(1);
+    CHECK(b && b->prev_log_index == 3 && b->entries.empty(),
+          "an acknowledgement must move nextIndex past the peer's match");
+
+    // A late duplicate of a refusal from B arrives after B's match of 3.
+    Message dup; dup.from = 1; dup.to = 0;
+    dup.aer = raft::AppendEntriesReply{2, false, 0};
+    out.clear(); ns[0].receive(dup, 160, out);
+    out.clear(); ns[0].tick(175, out);
+    b = sent_to(1);
+    CHECK(b && b->prev_log_index == 3 && b->entries.empty(),
+          "a refusal must never back nextIndex below the confirmed match");
 }
 
 // Section 5.4.1's INDEX tiebreak: same last term, shorter log -> no vote.
@@ -962,6 +1200,7 @@ int main() {
     // unexplained crash in the mutation table.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     int before = failures;
+    UNIT(unit_append_after_prev);
     UNIT(unit_figure8);
     UNIT(unit_stale_ae_retransmission);
     UNIT(unit_apply_and_replay);
@@ -976,9 +1215,14 @@ int main() {
     UNIT(unit_depose_deadline_reset);
     UNIT(unit_uptodate_index);
     UNIT(unit_minority_stall);
-    std::printf("%-14s figure8, stale-AE, stale-AE-reply, apply+replay, "
-                "votes x3, quorums x3, timers x2, clamp: %s\n", "scripted",
-                failures == before ? "pass" : "FAILURES above");
+    UNIT(unit_stepdown_on_higher_term_reply);
+    UNIT(unit_heartbeat_cadence);
+    UNIT(unit_next_index);
+    UNIT(unit_reelected_leader_stale_match);
+    std::printf("%-14s figure8, re-elected leader, stale-AE, stale-AE-reply, "
+                "append,\n%-14s apply+replay, votes x3, quorums x3, timers x3, "
+                "stepdown x2,\n%-14s next index, clamp: %s\n", "scripted", "",
+                "", failures == before ? "pass" : "FAILURES above");
 
     const int kSeeds = 150;
     const int sizes[] = {3, 5, 7};
